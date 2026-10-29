@@ -1,0 +1,18 @@
+{% extends "users/base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+  <h1>Users</h1>
+  <p><a href="{% url 'users:user_create' %}">Create user</a></p>
+  <ul>
+    {% for listed_user in users %}
+      <li>
+        <a href="{% url 'users:user_detail' listed_user.pk %}">
+          {{ listed_user.get_full_name|default:listed_user.username }}
+        </a>
+        {% if listed_user.profile.department %} — {{ listed_user.profile.department }}{% endif %}
+      </li>
+    {% empty %}
+      <li>No users have been added.</li>
+    {% endfor %}
+  </ul>
+{% endblock %}
