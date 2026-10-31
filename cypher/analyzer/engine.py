@@ -73,4 +73,4 @@ def analyze_repository(
     graph["stats"]["scanned_files"] = parse_result.get("stats", {}).get("scanned_files", len(files))
     graph["stats"]["failed_files"] = parse_result.get("stats", {}).get("failed_files", 0)
 
-    return graph
+    return graph    

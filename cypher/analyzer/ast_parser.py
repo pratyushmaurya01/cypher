@@ -423,6 +423,7 @@ class _SourceVisitor(ast.NodeVisitor):
                     "qualified_name": (
                         None if is_star or resolved is None else f"{resolved}.{alias.name}"
                     ),
+                    "is_relative": node.level > 0,
                 }
             )
         self._add_import(node, "from", node.module, node.level, aliases)
@@ -445,6 +446,7 @@ class _SourceVisitor(ast.NodeVisitor):
                 "conditional": self.conditional_depth > 0,
                 "type_checking": self.type_checking_depth > 0,
                 "scope": self._scope.kind,
+                "scope_name": self._scope.qualified_name if self._scope.kind != "module" else None,
             }
         )
 
@@ -490,6 +492,10 @@ class _SourceVisitor(ast.NodeVisitor):
             target_kind = "attribute"
         else:
             target_kind = "dynamic"
+        arguments: list[str] = [_expression(arg) for arg in node.args]
+        keywords: dict[str, str] = {
+            kw.arg: _expression(kw.value) for kw in node.keywords if kw.arg is not None
+        }
         self.calls.append(
             {
                 "id": self._id("call", f"{caller_key}:{call_name}"),
@@ -504,6 +510,8 @@ class _SourceVisitor(ast.NodeVisitor):
                 "caller_class": enclosing_class.qualified_name if enclosing_class else None,
                 "context": self._context,
                 "target_kind": target_kind,
+                "arguments": arguments,
+                "keywords": keywords,
             }
         )
         self.generic_visit(node)
@@ -561,6 +569,7 @@ class _SourceVisitor(ast.NodeVisitor):
             "is_generator": _is_generator(node),
             "parent_id": parent_scope.record["id"] if parent_scope.record else None,
             "is_method": parent_scope.kind == "class",
+            "local_assignments": [],
         }
         self.functions.append(record)
         if parent_scope.kind == "class" and parent_scope.record is not None:
@@ -717,6 +726,8 @@ class _SourceVisitor(ast.NodeVisitor):
             enclosing_class = self._nearest("class")
             if enclosing_class is not None and enclosing_class.record is not None:
                 self._method_self_attributes(node.targets, node.value, node.lineno, "", enclosing_class.record)
+            if scope.record is not None:
+                self._record_local_assignment(scope.record, node.targets, node.value, node.lineno, "")
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -730,6 +741,8 @@ class _SourceVisitor(ast.NodeVisitor):
             enclosing_class = self._nearest("class")
             if enclosing_class is not None and enclosing_class.record is not None:
                 self._method_self_attributes([node.target], node.value, node.lineno, annotation, enclosing_class.record)
+            if scope.record is not None:
+                self._record_local_assignment(scope.record, [node.target], node.value, node.lineno, annotation)
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
@@ -781,6 +794,34 @@ class _SourceVisitor(ast.NodeVisitor):
                     }
                 )
 
+    @staticmethod
+    def _record_local_assignment(
+        func_record: dict[str, Any] | None,
+        targets: list[ast.expr],
+        value: ast.expr | None,
+        line: int,
+        annotation: str,
+    ) -> None:
+        if func_record is None:
+            return
+        if "local_assignments" not in func_record:
+            func_record["local_assignments"] = []
+        call_callee = None
+        if isinstance(value, ast.Call):
+            call_callee, _, _ = _qualified_expression_name(value.func)
+        expr_str = _expression(value) if value is not None else None
+        for target in targets:
+            for name in _target_names(target):
+                func_record["local_assignments"].append(
+                    {
+                        "target": name,
+                        "value": expr_str,
+                        "call_callee": call_callee,
+                        "annotation": annotation,
+                        "line": line,
+                    }
+                )
+
     def _module_assignment(
         self,
         targets: list[ast.expr],
@@ -788,6 +829,10 @@ class _SourceVisitor(ast.NodeVisitor):
         line: int,
         annotation: str,
     ) -> None:
+        call_callee = None
+        if isinstance(value, ast.Call):
+            call_callee, _, _ = _qualified_expression_name(value.func)
+        expr_str = _expression(value) if value is not None else None
         for target in targets:
             for name in _target_names(target):
                 self.globals.append(
@@ -797,6 +842,8 @@ class _SourceVisitor(ast.NodeVisitor):
                         "annotation": annotation,
                         "is_constant": name.isupper(),
                         "value": _literal_representation(value) if value is not None else None,
+                        "expression": expr_str,
+                        "call_callee": call_callee,
                     }
                 )
                 if name == "urlpatterns":

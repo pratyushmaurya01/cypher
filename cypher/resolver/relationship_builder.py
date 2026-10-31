@@ -20,8 +20,52 @@ def _stable_id(kind: str, *parts: object) -> str:
 def _extract_http_methods(evidence: str) -> list[str]:
     """Extract HTTP methods from a FastAPI/Flask evidence string like \"['GET', 'POST']\"."""
     import re
-    found = re.findall(r"\b(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|TRACE)\b", evidence.upper())
+
+    found = re.findall(
+        r"\b(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|TRACE)\b", evidence.upper()
+    )
     return sorted(set(found)) if found else []
+
+
+def validate_graph(
+    entities: list[dict[str, Any]], relationships: list[dict[str, Any]]
+) -> list[str]:
+    """Validates structural and referential integrity of entities and relationships."""
+    errors: list[str] = []
+    entity_ids: set[str] = set()
+
+    for ent in entities:
+        ent_id = ent.get("id")
+        if not ent_id:
+            errors.append(f"Entity missing 'id': {ent}")
+        elif ent_id in entity_ids:
+            errors.append(f"Duplicate entity id: '{ent_id}'")
+        else:
+            entity_ids.add(ent_id)
+
+    rel_ids: set[str] = set()
+    for rel in relationships:
+        rel_id = rel.get("id")
+        if not rel_id:
+            errors.append(f"Relationship missing 'id': {rel}")
+        elif rel_id in rel_ids:
+            errors.append(f"Duplicate relationship id: '{rel_id}'")
+        else:
+            rel_ids.add(rel_id)
+
+        source_id = rel.get("source_id")
+        target_id = rel.get("target_id")
+
+        if not source_id or source_id not in entity_ids:
+            errors.append(
+                f"Relationship '{rel_id}' ({rel.get('type')}) has dangling source_id '{source_id}'"
+            )
+        if not target_id or target_id not in entity_ids:
+            errors.append(
+                f"Relationship '{rel_id}' ({rel.get('type')}) has dangling target_id '{target_id}'"
+            )
+
+    return errors
 
 
 class RelationshipBuilder:
@@ -44,12 +88,24 @@ class RelationshipBuilder:
         else:
             files_dict = all_files
 
-        entities = self.index.all_entities()
+        entities = list(self.index.all_entities())
+        entity_ids = {e["id"] for e in entities}
         relationships: list[dict[str, Any]] = []
-        seen_rel_keys: set[tuple[str, str, str, Any]] = set()
+        seen_rel_keys: set[tuple[str, str, str, Any, Any]] = set()
+
+        def add_entity(entity: dict[str, Any]) -> None:
+            if entity["id"] not in entity_ids:
+                entity_ids.add(entity["id"])
+                entities.append(entity)
 
         def add_relationship(rel: dict[str, Any]) -> None:
-            key = (rel["type"], rel["source_id"], rel["target_id"], rel.get("line"))
+            key = (
+                rel["type"],
+                rel["source_id"],
+                rel["target_id"],
+                rel.get("line"),
+                rel.get("metadata", {}).get("route"),
+            )
             if key not in seen_rel_keys:
                 seen_rel_keys.add(key)
                 relationships.append(rel)
@@ -65,7 +121,11 @@ class RelationshipBuilder:
             # Module DEFINES top-level functions and classes
             for func in file_record.get("functions", []):
                 if not func.get("is_method") and not func.get("parent_function"):
-                    func_qualified = f"{mod_name}.{func['qualified_name']}" if mod_name else func["qualified_name"]
+                    func_qualified = (
+                        f"{mod_name}.{func['qualified_name']}"
+                        if mod_name
+                        else func["qualified_name"]
+                    )
                     rel_id = _stable_id("rel_defines", file_id, func["id"])
                     add_relationship(
                         {
@@ -86,7 +146,11 @@ class RelationshipBuilder:
                     )
 
             for cls in file_record.get("classes", []):
-                cls_qualified = f"{mod_name}.{cls['qualified_name']}" if mod_name else cls["qualified_name"]
+                cls_qualified = (
+                    f"{mod_name}.{cls['qualified_name']}"
+                    if mod_name
+                    else cls["qualified_name"]
+                )
                 rel_id = _stable_id("rel_defines", file_id, cls["id"])
                 add_relationship(
                     {
@@ -108,10 +172,11 @@ class RelationshipBuilder:
 
                 # Class DEFINES_METHOD methods
                 for method_name in cls.get("methods", []):
-                    # method_name is e.g. "Profile.save"
                     method_sym = self.index.lookup_in_module(mod_name, method_name)
                     if method_sym is not None:
-                        rel_m_id = _stable_id("rel_defines_method", cls["id"], method_sym["id"])
+                        rel_m_id = _stable_id(
+                            "rel_defines_method", cls["id"], method_sym["id"]
+                        )
                         add_relationship(
                             {
                                 "id": rel_m_id,
@@ -142,7 +207,9 @@ class RelationshipBuilder:
             for imp in file_record.get("imports", []):
                 line = imp.get("line", 1)
                 for alias in imp.get("aliases", []):
-                    resolved_import = self.import_resolver.resolve_import_alias(alias, file_record)
+                    resolved_import = self.import_resolver.resolve_import_alias(
+                        alias, file_record
+                    )
                     if (
                         resolved_import
                         and resolved_import.target_file_path
@@ -153,7 +220,9 @@ class RelationshipBuilder:
                             seen_imported_files.add(target_file_path)
                             target_mod = self.index.lookup_module_by_path(target_file_path)
                             if target_mod:
-                                rel_id = _stable_id("rel_imports", source_file_id, target_mod["id"], line)
+                                rel_id = _stable_id(
+                                    "rel_imports", source_file_id, target_mod["id"], line
+                                )
                                 add_relationship(
                                     {
                                         "id": rel_id,
@@ -168,14 +237,16 @@ class RelationshipBuilder:
                                         "confidence": "high",
                                         "method": "ast_import",
                                         "evidence": f"File imports from '{target_mod['qualified_name']}'",
-                                        "metadata": {"imported_symbol": alias.get("name")},
+                                        "metadata": {
+                                            "imported_symbol": alias.get("name")
+                                        },
                                     }
                                 )
 
         # -------------------------------------------------------------------
         # 3. Class INHERITS Relationships
         # -------------------------------------------------------------------
-        for entity in entities:
+        for entity in list(entities):
             if entity.get("kind") == "class":
                 file_path = entity.get("file_path", "")
                 file_record = files_dict.get(file_path, {})
@@ -183,7 +254,6 @@ class RelationshipBuilder:
                 mod_name = file_record.get("module", "")
 
                 for base in entity.get("bases", []):
-                    # Check if base is in same module or imported
                     base_entity = None
                     resolved_base = base
 
@@ -202,7 +272,9 @@ class RelationshipBuilder:
                                 resolved_base = base_entity["qualified_name"]
 
                     if base_entity is not None:
-                        rel_id = _stable_id("rel_inherits", entity["id"], base_entity["id"])
+                        rel_id = _stable_id(
+                            "rel_inherits", entity["id"], base_entity["id"]
+                        )
                         add_relationship(
                             {
                                 "id": rel_id,
@@ -223,6 +295,19 @@ class RelationshipBuilder:
                     else:
                         # External inheritance (e.g. django.db.models.Model)
                         ext_id = _stable_id("external_class", resolved_base)
+                        ext_class_entity = {
+                            "id": ext_id,
+                            "kind": "class",
+                            "name": resolved_base.split(".")[-1],
+                            "local_qualified_name": resolved_base.split(".")[-1],
+                            "qualified_name": resolved_base,
+                            "file_path": "<external>",
+                            "line": 1,
+                            "is_external": True,
+                            "docstring": None,
+                        }
+                        add_entity(ext_class_entity)
+
                         rel_id = _stable_id("rel_inherits", entity["id"], ext_id)
                         add_relationship(
                             {
@@ -249,11 +334,17 @@ class RelationshipBuilder:
 
         for call in call_results:
             if call.resolved and call.target_entity_id:
-                rel_type = "INSTANTIATES" if call.method == "class_constructor" else "CALLS"
+                rel_type = (
+                    "INSTANTIATES" if call.method == "class_constructor" else "CALLS"
+                )
                 source_id = call.caller_id
                 if not source_id:
                     file_mod = self.index.lookup_module_by_path(call.caller_file)
-                    source_id = file_mod["id"] if file_mod else _stable_id("file", call.caller_file)
+                    source_id = (
+                        file_mod["id"]
+                        if file_mod
+                        else _stable_id("file", call.caller_file)
+                    )
 
                 rel_id = _stable_id(
                     f"rel_{rel_type.lower()}",
@@ -283,7 +374,6 @@ class RelationshipBuilder:
                     }
                 )
             else:
-                # Unresolved or external reference
                 ref_id = _stable_id(
                     "unresolved_ref",
                     call.caller_file,
@@ -311,9 +401,12 @@ class RelationshipBuilder:
         # -------------------------------------------------------------------
         for url in url_results:
             source_mod = self.index.lookup_module_by_path(url.source_file)
-            source_id = source_mod["id"] if source_mod else _stable_id("file", url.source_file)
+            source_id = (
+                source_mod["id"]
+                if source_mod
+                else _stable_id("file", url.source_file)
+            )
 
-            # Detect framework from evidence string to set the correct method tag
             ev = url.evidence.lower()
             if "fastapi route" in ev:
                 route_method = "fastapi_route"
@@ -332,7 +425,13 @@ class RelationshipBuilder:
                 include_method = "django_include"
 
             if url.rel_type == "ROUTES_TO" and url.target_entity_id:
-                rel_id = _stable_id("rel_routes_to", source_id, url.target_entity_id, url.route or "", url.line)
+                rel_id = _stable_id(
+                    "rel_routes_to",
+                    source_id,
+                    url.target_entity_id,
+                    url.route or "",
+                    url.line,
+                )
                 add_relationship(
                     {
                         "id": rel_id,
@@ -357,8 +456,30 @@ class RelationshipBuilder:
                     }
                 )
             elif url.rel_type == "INCLUDES":
-                target_id = url.include_file_id or _stable_id("external_include", url.include_target or "unknown")
-                rel_id = _stable_id("rel_includes", source_id, target_id, url.route or "", url.line)
+                if url.include_file_id:
+                    target_id = url.include_file_id
+                else:
+                    target_id = _stable_id(
+                        "external_include", url.include_target or "unknown"
+                    )
+                    # Register external module entity
+                    ext_mod_name = url.include_target or "unknown"
+                    ext_mod_entity = {
+                        "id": target_id,
+                        "kind": "module",
+                        "name": ext_mod_name.split(".")[-1],
+                        "local_qualified_name": ext_mod_name,
+                        "qualified_name": ext_mod_name,
+                        "file_path": "<external>",
+                        "line": 1,
+                        "is_external": True,
+                        "docstring": None,
+                    }
+                    add_entity(ext_mod_entity)
+
+                rel_id = _stable_id(
+                    "rel_includes", source_id, target_id, url.route or "", url.line
+                )
                 add_relationship(
                     {
                         "id": rel_id,
@@ -381,15 +502,37 @@ class RelationshipBuilder:
                 )
 
         # Sort relationships and entities deterministically
-        relationships.sort(key=lambda r: (r["type"], r["source_qualified"], r["target_qualified"] or "", r.get("line") or 0))
+        relationships.sort(
+            key=lambda r: (
+                r["type"],
+                r["source_qualified"],
+                r["target_qualified"] or "",
+                r.get("line") or 0,
+            )
+        )
         entities.sort(key=lambda e: (e["kind"], e["qualified_name"]))
-        unresolved_refs.sort(key=lambda u: (u["caller_file"], u["line"], u["column"], u["expression"]))
+        unresolved_refs.sort(
+            key=lambda u: (
+                u["caller_file"],
+                u["line"],
+                u["column"],
+                u["expression"],
+            )
+        )
+
+        # Validate graph referential integrity
+        validation_errors = validate_graph(entities, relationships)
 
         # Compute stats
         entities_by_kind = dict(Counter(e["kind"] for e in entities))
         rel_by_type = dict(Counter(r["type"] for r in relationships))
         external_count = sum(1 for u in unresolved_refs if u["status"] == "external")
-        unresolved_count = sum(1 for u in unresolved_refs if u["status"] in ("unresolved", "dynamic", "ambiguous"))
+        unresolved_count = sum(
+            1
+            for u in unresolved_refs
+            if u["status"] in ("unresolved", "dynamic", "ambiguous")
+        )
+        ambiguous_count = sum(1 for u in unresolved_refs if u["status"] == "ambiguous")
 
         return {
             "repository": {
@@ -399,7 +542,7 @@ class RelationshipBuilder:
             "entities": entities,
             "relationships": relationships,
             "unresolved_references": unresolved_refs,
-            "diagnostics": [],
+            "diagnostics": validation_errors,
             "stats": {
                 "total_entities": len(entities),
                 "entities_by_kind": entities_by_kind,
@@ -407,5 +550,7 @@ class RelationshipBuilder:
                 "relationships_by_type": rel_by_type,
                 "unresolved_calls": unresolved_count,
                 "external_calls": external_count,
+                "ambiguous_calls": ambiguous_count,
+                "validation_errors": len(validation_errors),
             },
         }

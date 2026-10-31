@@ -2,27 +2,13 @@
 
 The existing ast_parser already emits ``framework_hints`` with ``framework="fastapi"``
 and ``kind="route"`` for every function decorated via a FastAPI app or APIRouter.
-This resolver consumes those hints plus the raw call list (for include_router) to
+This resolver consumes those hints plus the call list (with static arguments) to
 produce ``UrlRelationship`` objects compatible with the rest of the pipeline.
-
-Resolution strategy
--------------------
-ROUTES_TO
-    For each ``framework_hints`` entry where ``framework="fastapi"`` and
-    ``kind="route"``, look up the function entity in the SymbolIndex by module +
-    function name.  Use ``details.path`` and ``details.methods`` from the hint.
-
-INCLUDES  (include_router)
-    Scan each file's ``calls`` list for calls whose ``base_name == "include_router"``.
-    The call record does not store arguments, so we can only confirm that an
-    include_router call exists in the file.  We try a best-effort resolution:
-    if the file's import map contains a ``router`` attribute originating from
-    another module, we produce a high-confidence relationship; otherwise we emit
-    a low-confidence placeholder so the information is not silently lost.
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
 from typing import Any
 
@@ -34,6 +20,23 @@ from cypher.resolver.symbol_index import SymbolIndex
 def _stable_id(kind: str, *parts: object) -> str:
     value = "\0".join((kind, *(str(p) for p in parts)))
     return f"{kind}_{hashlib.sha256(value.encode('utf-8')).hexdigest()[:20]}"
+
+
+def _clean_string_literal(value: str | None) -> str | None:
+    if not value or value == "<non-literal>":
+        return None
+    try:
+        evaluated = ast.literal_eval(value)
+        if isinstance(evaluated, str):
+            return evaluated
+    except (ValueError, SyntaxError):
+        pass
+    stripped = value.strip()
+    if (stripped.startswith("'") and stripped.endswith("'")) or (
+        stripped.startswith('"') and stripped.endswith('"')
+    ):
+        return stripped[1:-1]
+    return stripped
 
 
 class FastAPIResolver:
@@ -90,44 +93,48 @@ class FastAPIResolver:
             rel_id = _stable_id("rel_fastapi_route", file_path, func_name, route or "", line)
 
             if entity is not None:
-                results.append(UrlRelationship(
-                    id=rel_id,
-                    source_file=file_path,
-                    source_module=module_name,
-                    rel_type="ROUTES_TO",
-                    route=route,
-                    url_name=None,           # FastAPI uses path tags, not named URL patterns
-                    namespace=None,
-                    view_expression=func_name,
-                    target_entity_id=entity["id"],
-                    target_qualified=entity["qualified_name"],
-                    target_file=entity["file_path"],
-                    include_target=None,
-                    include_file_id=None,
-                    confidence=hint.get("confidence", "high"),
-                    evidence=f"fastapi route {http_methods} '{route}' -> {entity['qualified_name']} | {hint.get('evidence', '')}",
-                    line=line,
-                ))
+                results.append(
+                    UrlRelationship(
+                        id=rel_id,
+                        source_file=file_path,
+                        source_module=module_name,
+                        rel_type="ROUTES_TO",
+                        route=route,
+                        url_name=None,  # FastAPI uses path tags, not named URL patterns
+                        namespace=None,
+                        view_expression=func_name,
+                        target_entity_id=entity["id"],
+                        target_qualified=entity["qualified_name"],
+                        target_file=entity["file_path"],
+                        include_target=None,
+                        include_file_id=None,
+                        confidence=hint.get("confidence", "high"),
+                        evidence=f"fastapi route {http_methods} '{route}' -> {entity['qualified_name']} | {hint.get('evidence', '')}",
+                        line=line,
+                    )
+                )
             else:
                 # Function defined in the file but not yet indexed — emit low-confidence
-                results.append(UrlRelationship(
-                    id=rel_id,
-                    source_file=file_path,
-                    source_module=module_name,
-                    rel_type="ROUTES_TO",
-                    route=route,
-                    url_name=None,
-                    namespace=None,
-                    view_expression=func_name,
-                    target_entity_id=None,
-                    target_qualified=f"{module_name}.{func_name}" if module_name else func_name,
-                    target_file=file_path,
-                    include_target=None,
-                    include_file_id=None,
-                    confidence="low",
-                    evidence=f"fastapi route hint for '{func_name}' but entity not found in index | {hint.get('evidence', '')}",
-                    line=line,
-                ))
+                results.append(
+                    UrlRelationship(
+                        id=rel_id,
+                        source_file=file_path,
+                        source_module=module_name,
+                        rel_type="ROUTES_TO",
+                        route=route,
+                        url_name=None,
+                        namespace=None,
+                        view_expression=func_name,
+                        target_entity_id=None,
+                        target_qualified=f"{module_name}.{func_name}" if module_name else func_name,
+                        target_file=file_path,
+                        include_target=None,
+                        include_file_id=None,
+                        confidence="low",
+                        evidence=f"fastapi route hint for '{func_name}' but entity not found in index | {hint.get('evidence', '')}",
+                        line=line,
+                    )
+                )
         return results
 
     # ------------------------------------------------------------------
@@ -139,7 +146,7 @@ class FastAPIResolver:
         file_record: dict[str, Any],
         all_files: list[dict[str, Any]],
     ) -> list[UrlRelationship]:
-        """Find include_router() calls and try to resolve their targets."""
+        """Find include_router() calls and statically resolve their targets and prefix."""
         results: list[UrlRelationship] = []
         file_path = file_record.get("path", "")
         module_name = file_record.get("module", "")
@@ -150,39 +157,47 @@ class FastAPIResolver:
                 continue
 
             line: int = call.get("line", 1)
-            # The receiver of include_router (e.g. "app" or "router")
             receiver: str | None = call.get("receiver")
+            args: list[str] = call.get("arguments", [])
+            kwargs: dict[str, str] = call.get("keywords", {})
 
-            # Try to find a router module that was imported into this file.
-            # We look for any import whose local name resolves to a module
-            # containing FastAPI route hints.
-            target_entity, target_qualified, target_file_path, target_module = \
-                self._find_included_router_target(file_record, import_map, all_files)
+            router_arg = args[0] if args else None
+            prefix = _clean_string_literal(kwargs.get("prefix"))
 
-            rel_id = _stable_id("rel_fastapi_include", file_path, target_qualified or "unknown", line)
+            target_entity, target_qualified, target_file_path, target_module = (
+                self._find_included_router_target(file_record, import_map, all_files, router_arg)
+            )
 
-            results.append(UrlRelationship(
-                id=rel_id,
-                source_file=file_path,
-                source_module=module_name,
-                rel_type="INCLUDES",
-                route=None,       # prefix not recoverable from call record alone
-                url_name=None,
-                namespace=None,
-                view_expression=None,
-                target_entity_id=target_entity["id"] if target_entity else None,
-                target_qualified=target_qualified,
-                target_file=target_file_path,
-                include_target=target_module,
-                include_file_id=target_entity["id"] if target_entity else None,
-                confidence="high" if target_entity else "low",
-                evidence=(
-                    f"fastapi include_router() call by '{receiver}' -> {target_module or 'unknown router'}"
-                    if target_entity
-                    else f"fastapi include_router() call detected (receiver='{receiver}') but target router module unresolved"
-                ),
-                line=line,
-            ))
+            rel_id = _stable_id(
+                "rel_fastapi_include", file_path, target_qualified or "unknown", line
+            )
+
+            evidence_detail = (
+                f"fastapi include_router({router_arg or ''}, prefix='{prefix}') -> {target_module}"
+                if target_entity
+                else f"fastapi include_router() call detected (receiver='{receiver}') but target router module unresolved"
+            )
+
+            results.append(
+                UrlRelationship(
+                    id=rel_id,
+                    source_file=file_path,
+                    source_module=module_name,
+                    rel_type="INCLUDES",
+                    route=prefix,
+                    url_name=None,
+                    namespace=None,
+                    view_expression=router_arg,
+                    target_entity_id=target_entity["id"] if target_entity else None,
+                    target_qualified=target_qualified,
+                    target_file=target_file_path,
+                    include_target=target_module,
+                    include_file_id=target_entity["id"] if target_entity else None,
+                    confidence="high" if target_entity else "low",
+                    evidence=evidence_detail,
+                    line=line,
+                )
+            )
         return results
 
     def _find_included_router_target(
@@ -190,12 +205,47 @@ class FastAPIResolver:
         file_record: dict[str, Any],
         import_map: dict[str, str],
         all_files: list[dict[str, Any]],
+        router_arg: str | None = None,
     ) -> tuple[dict | None, str | None, str | None, str | None]:
-        """
-        Heuristic: find which module in the repo defines an APIRouter that is
-        imported into this file.  Returns (entity, qualified_name, file_path, module).
-        """
-        # Build a quick lookup: module_name -> file_record for FastAPI-router files
+        """Resolves target router module from call argument or import map."""
+        # 1. Argument-based static resolution
+        if router_arg:
+            clean_arg = router_arg.strip()
+            if "." in clean_arg:
+                head, _, _ = clean_arg.partition(".")
+                if head in import_map:
+                    target_mod_name = import_map[head]
+                    mod_entity = self.index.lookup_module(target_mod_name)
+                    if mod_entity:
+                        return (
+                            mod_entity,
+                            target_mod_name,
+                            mod_entity["file_path"],
+                            target_mod_name,
+                        )
+            elif clean_arg in import_map:
+                qualified = import_map[clean_arg]
+                parts = qualified.rsplit(".", 1)
+                if len(parts) == 2:
+                    parent_mod = parts[0]
+                    mod_entity = self.index.lookup_module(parent_mod)
+                    if mod_entity:
+                        return (
+                            mod_entity,
+                            parent_mod,
+                            mod_entity["file_path"],
+                            parent_mod,
+                        )
+                mod_entity = self.index.lookup_module(qualified)
+                if mod_entity:
+                    return (
+                        mod_entity,
+                        qualified,
+                        mod_entity["file_path"],
+                        qualified,
+                    )
+
+        # 2. Heuristic fallback: find which imported module defines FastAPI routes
         router_modules: dict[str, dict[str, Any]] = {}
         for f in all_files:
             has_router = any(
@@ -205,12 +255,9 @@ class FastAPIResolver:
             if has_router and f.get("module"):
                 router_modules[f["module"]] = f
 
-        # Check import_map: if any imported qualified_name starts with a router module
         for local_name, qualified in import_map.items():
-            # e.g. local_name="users", qualified="routers.users"
             mod_entity = self.index.lookup_module(qualified)
             if mod_entity and qualified in router_modules:
                 return mod_entity, qualified, mod_entity["file_path"], qualified
 
-        # Fallback: return None
         return None, None, None, None
