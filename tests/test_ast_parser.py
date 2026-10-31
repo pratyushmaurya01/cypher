@@ -118,7 +118,7 @@ else:
     by_line = {item["line"]: item for item in imports}
     assert by_line[1]["aliases"][0]["alias"] == "operating_system"
     assert by_line[2]["aliases"][0]["resolved_module"] == "collections"
-    assert by_line[3]["aliases"][0]["resolved_module"] == "pkg.helper.thing"
+    assert by_line[3]["aliases"][0]["qualified_name"] == "pkg.helper.thing"
     assert by_line[4]["aliases"][0]["name"] == "*"
     assert by_line[6]["conditional"] is True
     assert by_line[8]["conditional"] is True

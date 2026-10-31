@@ -713,6 +713,10 @@ class _SourceVisitor(ast.NodeVisitor):
             self._module_assignment(node.targets, node.value, node.lineno, "")
         elif scope.kind == "class" and scope.record is not None:
             self._class_attributes(node.targets, node.value, node.lineno, "", scope.record)
+        elif scope.kind == "function":
+            enclosing_class = self._nearest("class")
+            if enclosing_class is not None and enclosing_class.record is not None:
+                self._method_self_attributes(node.targets, node.value, node.lineno, "", enclosing_class.record)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -722,6 +726,10 @@ class _SourceVisitor(ast.NodeVisitor):
             self._module_assignment([node.target], node.value, node.lineno, annotation)
         elif scope.kind == "class" and scope.record is not None:
             self._class_attributes([node.target], node.value, node.lineno, annotation, scope.record)
+        elif scope.kind == "function":
+            enclosing_class = self._nearest("class")
+            if enclosing_class is not None and enclosing_class.record is not None:
+                self._method_self_attributes([node.target], node.value, node.lineno, annotation, enclosing_class.record)
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
@@ -732,6 +740,27 @@ class _SourceVisitor(ast.NodeVisitor):
         ):
             self._urlpatterns.append((node.lineno, node.value))
         self.generic_visit(node)
+
+    @staticmethod
+    def _method_self_attributes(
+        targets: list[ast.expr],
+        value: ast.expr | None,
+        line: int,
+        annotation: str,
+        class_record: dict[str, Any],
+    ) -> None:
+        for target in targets:
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self":
+                name = target.attr
+                if not any(attr["name"] == name for attr in class_record["attributes"]):
+                    class_record["attributes"].append(
+                        {
+                            "name": name,
+                            "line": line,
+                            "annotation": annotation,
+                            "value": _literal_representation(value) if value is not None else None,
+                        }
+                    )
 
     @staticmethod
     def _class_attributes(
@@ -991,6 +1020,17 @@ class _SourceVisitor(ast.NodeVisitor):
                         details["route"] = child.args[0].value
                     if len(child.args) > 1:
                         details["view"] = _expression(child.args[1])
+                for kw in child.keywords:
+                    if kw.arg == "name":
+                        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            details["name"] = kw.value.value
+                        else:
+                            details["name"] = _expression(kw.value)
+                    elif kw.arg == "namespace":
+                        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            details["namespace"] = kw.value.value
+                        else:
+                            details["namespace"] = _expression(kw.value)
                 self._hint("django", "url_pattern", call_name, child.lineno, confidence, evidence, details)
             if django_backed:
                 self._hint("django", "url_patterns", "urlpatterns", line, "high", "urlpatterns contains django-resolved path()/re_path()/include() calls")
