@@ -10,6 +10,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
     import neo4j
     from neo4j import Driver, GraphDatabase
     NEO4J_AVAILABLE = True
@@ -24,7 +30,7 @@ class Neo4jConfig:
     """Connection parameters for Neo4j."""
 
     uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user: str = os.getenv("NEO4J_USER", "neo4j")
+    user: str = os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j"))
     password: str = os.getenv("NEO4J_PASSWORD", "password")
     database: str = os.getenv("NEO4J_DATABASE", "neo4j")
 

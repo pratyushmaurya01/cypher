@@ -13,9 +13,10 @@ from cypher.graph.neo4j_client import Neo4jClient
 
 FUNCTION_DEPENDENCIES_QUERY = """
 MATCH (f:Function {qualified_name: $qualified_name})
+WHERE ($repository_id IS NULL OR f.repository_id = $repository_id)
 MATCH path = (f)-[:CALLS|INSTANTIATES*1..3]->(target:Entity)
 RETURN DISTINCT target.qualified_name AS target,
-       target.kind AS kind,
+       [lbl IN labels(target) WHERE lbl <> 'Entity'][0] AS kind,
        target.file_path AS file,
        length(path) AS depth
 ORDER BY depth, target
@@ -23,6 +24,7 @@ ORDER BY depth, target
 
 FUNCTION_CALLERS_QUERY = """
 MATCH (target:Function {qualified_name: $qualified_name})
+WHERE ($repository_id IS NULL OR target.repository_id = $repository_id)
 MATCH path = (caller:Function)-[:CALLS*1..3]->(target)
 RETURN DISTINCT caller.qualified_name AS caller,
        caller.file_path AS file,
@@ -32,6 +34,7 @@ ORDER BY depth, caller
 
 ALL_ROUTES_QUERY = """
 MATCH (source:Entity)-[r:ROUTES_TO]->(target:Function)
+WHERE ($repository_id IS NULL OR r.repository_id = $repository_id)
 RETURN source.qualified_name AS source,
        r.route AS route,
        r.http_methods AS http_methods,
@@ -43,6 +46,7 @@ ORDER BY route, handler
 
 MODULE_IMPORTS_QUERY = """
 MATCH (m:Module {qualified_name: $module_name})-[r:IMPORTS]->(imported:Module)
+WHERE ($repository_id IS NULL OR m.repository_id = $repository_id)
 RETURN imported.qualified_name AS imported_module,
        imported.file_path AS file_path,
        r.confidence AS confidence
@@ -51,6 +55,7 @@ ORDER BY imported_module
 
 MODULE_REVERSE_IMPORTS_QUERY = """
 MATCH (importer:Module)-[r:IMPORTS]->(m:Module {qualified_name: $module_name})
+WHERE ($repository_id IS NULL OR m.repository_id = $repository_id)
 RETURN importer.qualified_name AS importing_module,
        importer.file_path AS file_path
 ORDER BY importing_module
@@ -58,6 +63,7 @@ ORDER BY importing_module
 
 CLASS_HIERARCHY_QUERY = """
 MATCH (c:Class {qualified_name: $class_name})
+WHERE ($repository_id IS NULL OR c.repository_id = $repository_id)
 OPTIONAL MATCH (c)-[:INHERITS*1..5]->(super:Entity)
 OPTIONAL MATCH (sub:Class)-[:INHERITS*1..5]->(c)
 RETURN c.qualified_name AS class,
@@ -68,6 +74,7 @@ RETURN c.qualified_name AS class,
 DEAD_CODE_CANDIDATES_QUERY = """
 MATCH (f:Function:Entity)
 WHERE NOT (f.is_external)
+  AND ($repository_id IS NULL OR f.repository_id = $repository_id)
   AND NOT (:Entity)-[:CALLS]->(f)
   AND NOT (:Entity)-[:ROUTES_TO]->(f)
   AND NOT f.name STARTS WITH 'test_'
@@ -80,12 +87,13 @@ ORDER BY file, line
 
 REPOSITORY_OVERVIEW_QUERY = """
 MATCH (r:Repository)
-OPTIONAL MATCH (m:Module)
-OPTIONAL MATCH (c:Class)
-OPTIONAL MATCH (f:Function)
+WHERE ($repository_id IS NULL OR r.id = $repository_id)
+OPTIONAL MATCH (m:Module) WHERE ($repository_id IS NULL OR m.repository_id = r.id)
+OPTIONAL MATCH (c:Class) WHERE ($repository_id IS NULL OR c.repository_id = r.id)
+OPTIONAL MATCH (f:Function) WHERE ($repository_id IS NULL OR f.repository_id = r.id)
 OPTIONAL MATCH (x:ExternalDependency)
-OPTIONAL MATCH ()-[rel:CALLS]->()
-OPTIONAL MATCH ()-[route:ROUTES_TO]->()
+OPTIONAL MATCH ()-[rel:CALLS]->() WHERE ($repository_id IS NULL OR rel.repository_id = r.id)
+OPTIONAL MATCH ()-[route:ROUTES_TO]->() WHERE ($repository_id IS NULL OR route.repository_id = r.id)
 RETURN count(DISTINCT m) AS total_modules,
        count(DISTINCT c) AS total_classes,
        count(DISTINCT f) AS total_functions,
@@ -100,52 +108,71 @@ RETURN count(DISTINCT m) AS total_modules,
 # ---------------------------------------------------------------------------
 
 def find_function_dependencies(
-    client: Neo4jClient, qualified_name: str
+    client: Neo4jClient, qualified_name: str, repository_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Return all functions and classes called or instantiated by `qualified_name`."""
     return client.execute_query(
-        FUNCTION_DEPENDENCIES_QUERY, {"qualified_name": qualified_name}
+        FUNCTION_DEPENDENCIES_QUERY,
+        {"qualified_name": qualified_name, "repository_id": repository_id},
     )
 
 
 def find_function_callers(
-    client: Neo4jClient, qualified_name: str
+    client: Neo4jClient, qualified_name: str, repository_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Return all functions calling `qualified_name` directly or transitively."""
     return client.execute_query(
-        FUNCTION_CALLERS_QUERY, {"qualified_name": qualified_name}
+        FUNCTION_CALLERS_QUERY,
+        {"qualified_name": qualified_name, "repository_id": repository_id},
     )
 
 
-def find_all_routes(client: Neo4jClient) -> list[dict[str, Any]]:
+def find_all_routes(
+    client: Neo4jClient, repository_id: str | None = None
+) -> list[dict[str, Any]]:
     """Return all HTTP endpoints and their handler functions."""
-    return client.execute_query(ALL_ROUTES_QUERY)
+    return client.execute_query(ALL_ROUTES_QUERY, {"repository_id": repository_id})
 
 
 def find_module_dependencies(
-    client: Neo4jClient, module_name: str
+    client: Neo4jClient, module_name: str, repository_id: str | None = None
 ) -> dict[str, list[dict[str, Any]]]:
     """Return both outgoing and incoming module imports for `module_name`."""
-    outgoing = client.execute_query(MODULE_IMPORTS_QUERY, {"module_name": module_name})
+    outgoing = client.execute_query(
+        MODULE_IMPORTS_QUERY,
+        {"module_name": module_name, "repository_id": repository_id},
+    )
     incoming = client.execute_query(
-        MODULE_REVERSE_IMPORTS_QUERY, {"module_name": module_name}
+        MODULE_REVERSE_IMPORTS_QUERY,
+        {"module_name": module_name, "repository_id": repository_id},
     )
     return {"imports": outgoing, "imported_by": incoming}
 
 
 def find_class_hierarchy(
-    client: Neo4jClient, class_name: str
+    client: Neo4jClient, class_name: str, repository_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Return superclasses and subclasses for `class_name`."""
-    return client.execute_query(CLASS_HIERARCHY_QUERY, {"class_name": class_name})
+    return client.execute_query(
+        CLASS_HIERARCHY_QUERY,
+        {"class_name": class_name, "repository_id": repository_id},
+    )
 
 
-def find_uncalled_functions(client: Neo4jClient) -> list[dict[str, Any]]:
+def find_uncalled_functions(
+    client: Neo4jClient, repository_id: str | None = None
+) -> list[dict[str, Any]]:
     """Return functions that are never called internally or connected to routes."""
-    return client.execute_query(DEAD_CODE_CANDIDATES_QUERY)
+    return client.execute_query(
+        DEAD_CODE_CANDIDATES_QUERY, {"repository_id": repository_id}
+    )
 
 
-def get_repository_overview(client: Neo4jClient) -> dict[str, Any]:
+def get_repository_overview(
+    client: Neo4jClient, repository_id: str | None = None
+) -> dict[str, Any]:
     """Return aggregated statistics on repository entities and relationships."""
-    res = client.execute_query(REPOSITORY_OVERVIEW_QUERY)
+    res = client.execute_query(
+        REPOSITORY_OVERVIEW_QUERY, {"repository_id": repository_id}
+    )
     return res[0] if res else {}

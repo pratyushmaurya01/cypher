@@ -48,6 +48,7 @@ class GraphBuilder:
             is_ext = entity.get("is_external", False)
             props = {
                 "id": entity["id"],
+                "repository_id": repo_id,
                 "name": entity.get("name", ""),
                 "qualified_name": entity.get("qualified_name", ""),
                 "file_path": entity.get("file_path", ""),
@@ -105,6 +106,7 @@ class GraphBuilder:
             meta = rel.get("metadata", {})
             props = {
                 "id": rel["id"],
+                "repository_id": repo_id,
                 "type": rel_type,
                 "line": rel.get("line") or 1,
                 "confidence": rel.get("confidence", "high"),
@@ -183,10 +185,11 @@ class GraphBuilder:
         repo_id = payload["repository"]["id"]
 
         if clear_existing_repo:
+            # Delete only nodes belonging to this repository without touching other repos or shared external dependencies
             self.client.execute_write(
                 """
                 MATCH (r:Repository {id: $repo_id})
-                OPTIONAL MATCH (r)-[:CONTAINS*1..2]->(n:Entity)
+                OPTIONAL MATCH (n:Entity {repository_id: $repo_id})
                 DETACH DELETE n, r
                 """,
                 {"repo_id": repo_id},
