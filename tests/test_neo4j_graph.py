@@ -170,8 +170,8 @@ def test_queries_parameter_binding():
     res = find_function_dependencies(mock_client, "app.handler")
     assert res == [{"target": "db.query", "depth": 1}]
     mock_client.execute_query.assert_called_with(
-        pytest.approx.__self__ if False else None or mock_client.execute_query.call_args[0][0],
-        {"qualified_name": "app.handler"},
+        mock_client.execute_query.call_args[0][0],
+        {"qualified_name": "app.handler", "repository_id": None},
     )
 
     find_function_callers(mock_client, "db.query")

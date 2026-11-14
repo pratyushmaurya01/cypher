@@ -76,6 +76,7 @@ class GraphBuilder:
             elif kind == "class":
                 props["bases"] = entity.get("bases", [])
                 props["decorators"] = entity.get("decorators", [])
+                props["end_line"] = entity.get("end_line") or props["line"]
                 if is_ext:
                     external_dependencies.append(props)
                 else:
@@ -84,6 +85,7 @@ class GraphBuilder:
                 props["is_method"] = entity.get("is_method", False)
                 props["decorators"] = entity.get("decorators", [])
                 props["return_annotation"] = entity.get("return_annotation") or ""
+                props["end_line"] = entity.get("end_line") or props["line"]
                 functions.append(props)
             else:
                 external_dependencies.append(props)
