@@ -28,6 +28,9 @@ from cypher.graph import queries
 from cypher.schemas.graph import (
     ClassHierarchy,
     DeadCodeCandidate,
+    EntityDetail,
+    EntityItem,
+    FileDependencies,
     FunctionCaller,
     FunctionDependency,
     ModuleDependencies,
@@ -307,3 +310,92 @@ def get_dead_code(
         )
         for row in rows
     ]
+
+
+@router.get(
+    "/entities",
+    response_model=list[EntityItem],
+    summary="List graph entities with filtering and pagination",
+)
+def list_entities(
+    request: Request,
+    repository_id: RepoId,
+    db: Annotated[Session, Depends(get_db)],
+    kind: Annotated[str | None, Query(description="Filter by entity label (e.g. Function, Class, Module)")] = None,
+    file_path: Annotated[str | None, Query(description="Filter by relative file path")] = None,
+    skip: Annotated[int, Query(ge=0, description="Offset for pagination")] = 0,
+    limit: Annotated[int, Query(ge=1, le=1000, description="Page size limit (max 1000)")] = 100,
+    current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
+) -> list[EntityItem]:
+    """Return a paginated list of entity nodes in the repository graph."""
+    check_graph_access(repository_id, db, current_user)
+    client = _neo4j(request)
+    try:
+        rows = queries.find_entities(
+            client,
+            repository_id=repository_id,
+            kind=kind,
+            file_path=file_path,
+            skip=skip,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.error("List entities query failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Graph query failed.")
+
+    return [EntityItem.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/entity/{entity_id}",
+    response_model=EntityDetail,
+    summary="Get entity detail along with incoming and outgoing relationships",
+)
+def get_entity_detail_endpoint(
+    request: Request,
+    repository_id: RepoId,
+    entity_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
+) -> EntityDetail:
+    """Retrieve full details of an entity node and its connected relationships."""
+    check_graph_access(repository_id, db, current_user)
+    client = _neo4j(request)
+    try:
+        detail = queries.get_entity_detail(client, repository_id=repository_id, entity_id=entity_id)
+    except Exception as exc:
+        logger.error("Get entity detail query failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Graph query failed.")
+
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Entity '{entity_id}' not found in repository.")
+
+    return EntityDetail(
+        entity=EntityItem.model_validate(detail["entity"]),
+        incoming_relationships=detail["incoming_relationships"],
+        outgoing_relationships=detail["outgoing_relationships"],
+    )
+
+
+@router.get(
+    "/file/dependencies",
+    response_model=FileDependencies,
+    summary="Explore file-level import relationships",
+)
+def get_file_dependencies_endpoint(
+    request: Request,
+    repository_id: RepoId,
+    file_path: Annotated[str, Query(description="Relative file path within repository")],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
+) -> FileDependencies:
+    """Explore file-to-file import relationships."""
+    check_graph_access(repository_id, db, current_user)
+    client = _neo4j(request)
+    try:
+        deps = queries.find_file_dependencies(client, repository_id=repository_id, file_path=file_path)
+    except Exception as exc:
+        logger.error("File dependencies query failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Graph query failed.")
+
+    return FileDependencies.model_validate(deps)

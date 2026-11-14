@@ -15,6 +15,7 @@ import os
 import shutil
 from pathlib import Path, PurePosixPath
 from typing import Any
+import uuid
 
 from cypher.config import get_settings
 from cypher.graph.neo4j_client import Neo4jClient
@@ -197,6 +198,85 @@ class SourceCodeService:
             return repo_base
         return current_dir
 
+    def stage_snapshot(
+        self,
+        source_dir: Path,
+        owner_id: int | str,
+        repository_id: str,
+    ) -> tuple[Path, str]:
+        """Copy extracted source files to an isolated staging directory.
+
+        Returns:
+            (staging_path, staging_token)
+        """
+        repo_base = (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
+        token = uuid.uuid4().hex[:12]
+        staging_dir = repo_base / f".staging_{token}"
+        staging_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_dir, staging_dir, dirs_exist_ok=True)
+        return staging_dir, token
+
+    def promote_staged_snapshot(
+        self,
+        owner_id: int | str,
+        repository_id: str,
+        staging_token: str,
+        version: int,
+    ) -> Path:
+        """Promote a staged snapshot into the permanent versioned snapshot store.
+
+        Safe on Windows (avoids WinError 5 / locked replace conflicts).
+        Returns the canonical Path of the versioned snapshot.
+        """
+        repo_base = (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
+        staging_dir = repo_base / f".staging_{staging_token}"
+        if not staging_dir.exists():
+            raise SourceCodeError(f"Staged snapshot not found: {staging_dir}")
+
+        snapshots_dir = repo_base / "snapshots"
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        version_dir = snapshots_dir / f"v{version}"
+
+        if version_dir.exists():
+            retiring_dir = repo_base / f".retiring_{version}_{uuid.uuid4().hex[:8]}"
+            try:
+                version_dir.rename(retiring_dir)
+                shutil.rmtree(retiring_dir, ignore_errors=True)
+            except OSError:
+                shutil.rmtree(version_dir, ignore_errors=True)
+
+        shutil.copytree(staging_dir, version_dir, dirs_exist_ok=True)
+
+        # Update current pointer snapshot
+        current_dir = repo_base / "current"
+        if current_dir.exists():
+            shutil.rmtree(current_dir, ignore_errors=True)
+        shutil.copytree(version_dir, current_dir, dirs_exist_ok=True)
+
+        # Clean staging directory
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+        logger.info(
+            "Promoted staged snapshot to version %d for repo '%s' at: %s",
+            version,
+            repository_id,
+            version_dir,
+        )
+        return version_dir
+
+    def cleanup_staged_snapshot(
+        self,
+        owner_id: int | str,
+        repository_id: str,
+        staging_token: str,
+    ) -> None:
+        """Clean up an unpromoted staging directory upon analysis or ingestion failure."""
+        repo_base = (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
+        staging_dir = repo_base / f".staging_{staging_token}"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            logger.info("Cleaned unpromoted staging directory: %s", staging_dir)
+
     def store_snapshot(
         self,
         source_dir: Path,
@@ -209,37 +289,18 @@ class SourceCodeService:
         Preserves past versions under snapshots/v{version}/ and points 'current' to the latest.
         Returns the absolute Path of the stored snapshot.
         """
-        repo_base = (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
-        snapshots_dir = repo_base / "snapshots"
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
-
-        # Determine version number
+        staging_dir, token = self.stage_snapshot(source_dir, owner_id, repository_id)
         if version is None:
+            repo_base = (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
+            snapshots_dir = repo_base / "snapshots"
             existing_versions = []
-            for d in snapshots_dir.iterdir():
-                if d.is_dir() and d.name.startswith("v") and d.name[1:].isdigit():
-                    existing_versions.append(int(d.name[1:]))
+            if snapshots_dir.exists():
+                for d in snapshots_dir.iterdir():
+                    if d.is_dir() and d.name.startswith("v") and d.name[1:].isdigit():
+                        existing_versions.append(int(d.name[1:]))
             version = max(existing_versions) + 1 if existing_versions else 1
 
-        version_dir = snapshots_dir / f"v{version}"
-        if version_dir.exists():
-            shutil.rmtree(version_dir, ignore_errors=True)
-        version_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_dir, version_dir, dirs_exist_ok=True)
-
-        # Update 'current' directory snapshot
-        current_dir = repo_base / "current"
-        if current_dir.exists():
-            shutil.rmtree(current_dir, ignore_errors=True)
-        shutil.copytree(version_dir, current_dir, dirs_exist_ok=True)
-
-        logger.info(
-            "Stored immutable persistent repository snapshot for repo '%s' v%d at: %s",
-            repository_id,
-            version,
-            version_dir,
-        )
-        return version_dir
+        return self.promote_staged_snapshot(owner_id, repository_id, token, version)
 
     def get_file_content(
         self,

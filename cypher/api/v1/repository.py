@@ -14,6 +14,7 @@ GET /api/v1/repository/{repository_id}
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import tempfile
 from pathlib import Path
@@ -113,8 +114,24 @@ async def upload_and_analyze(
         )
     owner = current_user or _get_or_create_default_dev_user(db)
 
-    # Read file into memory
-    zip_bytes = await file.read()
+    # Stream file into temporary buffer enforcing byte limit on the fly
+    chunk_size = 1024 * 1024  # 1 MB chunk
+    total_bytes = 0
+    buffer = io.BytesIO()
+
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Upload exceeds the maximum allowed size of {settings.max_upload_bytes // (1024 * 1024)} MB.",
+            )
+        buffer.write(chunk)
+
+    zip_bytes = buffer.getvalue()
 
     with tempfile.TemporaryDirectory() as tmp:
         work_dir = Path(tmp)
@@ -162,29 +179,26 @@ async def upload_and_analyze(
             )
 
         next_version = (existing_repo.current_version + 1) if existing_repo else 1
+        staged_repo_id = repo_id
+        from cypher.services.source_code_service import SourceCodeService
+        source_service = SourceCodeService()
+        staging_dir, staging_token = source_service.stage_snapshot(
+            source_dir=python_root,
+            owner_id=owner.id,
+            repository_id=staged_repo_id,
+        )
 
         try:
-            # Step 1: Store persistent immutable versioned snapshot
-            from cypher.services.source_code_service import SourceCodeService
-            source_service = SourceCodeService()
-            snapshot_path = source_service.store_snapshot(
-                source_dir=python_root,
-                owner_id=owner.id,
-                repository_id=repo_id,
-                version=next_version,
-            )
-
-            # Step 2: Run AST analysis and Neo4j graph ingestion
+            # Step 1: Run AST analysis and Neo4j graph ingestion
             result = run_analysis(
                 python_root,
                 neo4j_client,
                 repository_id=repo_id,
                 clear_existing=True,
             )
-            # If result returned a different repo_id (e.g. mocked in older tests), preserve compatibility
+
             returned_id = result.get("repository_id")
             if returned_id and returned_id != repo_id:
-                # Check ownership of returned_id if mocked
                 alt_existing = (
                     db.query(RepositoryMetadata)
                     .filter(RepositoryMetadata.repository_id == returned_id)
@@ -199,9 +213,23 @@ async def upload_and_analyze(
                 existing_repo = alt_existing
                 next_version = (existing_repo.current_version + 1) if existing_repo else 1
 
-        except HTTPException:
-            raise
+            # Step 2: Ingestion succeeded; promote staged snapshot to permanent version
+            snapshot_path = source_service.promote_staged_snapshot(
+                owner_id=owner.id,
+                repository_id=staged_repo_id,
+                staging_token=staging_token,
+                version=next_version,
+            )
+
         except Exception as exc:
+            # Clean up unpromoted staging files immediately
+            source_service.cleanup_staged_snapshot(
+                owner_id=owner.id,
+                repository_id=staged_repo_id,
+                staging_token=staging_token,
+            )
+            if isinstance(exc, HTTPException):
+                raise
             logger.error("Analysis failed for '%s': %s", repo_name, exc, exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -284,3 +312,49 @@ def get_repository_details(
     """Retrieve metadata for a specific repository. Ensures caller is the owner."""
     repo = verify_repository_access(repository_id, current_user, db)
     return RepositoryListItem.model_validate(repo)
+
+
+@router.delete(
+    "/{repository_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete a repository and its associated graph and snapshot data",
+)
+def delete_repository(
+    request: Request,
+    repository_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, Any]:
+    """Atomically remove a repository across PostgreSQL, Neo4j, and filesystem storage."""
+    repo = verify_repository_access(repository_id, current_user, db)
+    owner_id = repo.owner_id
+
+    # 1. Neo4j graph removal
+    neo4j_client = getattr(request.app.state, "neo4j_client", None)
+    if neo4j_client is not None:
+        try:
+            from cypher.graph.queries import delete_repository_graph
+            delete_repository_graph(neo4j_client, repository_id)
+            logger.info("Deleted Neo4j graph nodes for repository '%s'", repository_id)
+        except Exception as exc:
+            logger.error("Failed to delete Neo4j graph for repository '%s': %s", repository_id, exc)
+
+    # 2. PostgreSQL cascade removal
+    db.delete(repo)
+    db.commit()
+    logger.info("Deleted database record for repository '%s'", repository_id)
+
+    # 3. Disk snapshot storage removal
+    from cypher.services.source_code_service import SourceCodeService
+    source_service = SourceCodeService()
+    repo_base = (source_service.storage_dir / str(owner_id) / str(repository_id)).resolve()
+    if repo_base.exists():
+        import shutil
+        shutil.rmtree(repo_base, ignore_errors=True)
+        logger.info("Deleted filesystem snapshot storage at '%s'", repo_base)
+
+    return {
+        "status": "deleted",
+        "repository_id": repository_id,
+        "message": f"Repository '{repository_id}' and all associated graph and snapshot data deleted successfully.",
+    }

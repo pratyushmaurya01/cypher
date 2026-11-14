@@ -88,17 +88,23 @@ ORDER BY file, line
 REPOSITORY_OVERVIEW_QUERY = """
 MATCH (r:Repository)
 WHERE ($repository_id IS NULL OR r.id = $repository_id)
-OPTIONAL MATCH (m:Module) WHERE ($repository_id IS NULL OR m.repository_id = r.id)
-OPTIONAL MATCH (c:Class) WHERE ($repository_id IS NULL OR c.repository_id = r.id)
-OPTIONAL MATCH (f:Function) WHERE ($repository_id IS NULL OR f.repository_id = r.id)
-OPTIONAL MATCH (x:ExternalDependency)
-OPTIONAL MATCH ()-[rel:CALLS]->() WHERE ($repository_id IS NULL OR rel.repository_id = r.id)
-OPTIONAL MATCH ()-[route:ROUTES_TO]->() WHERE ($repository_id IS NULL OR route.repository_id = r.id)
-RETURN count(DISTINCT m) AS total_modules,
-       count(DISTINCT c) AS total_classes,
-       count(DISTINCT f) AS total_functions,
-       count(DISTINCT x) AS total_externals,
-       count(DISTINCT rel) AS total_calls,
+WITH r
+OPTIONAL MATCH (m:Module {repository_id: r.id})
+WITH r, count(DISTINCT m) AS total_modules
+OPTIONAL MATCH (c:Class {repository_id: r.id})
+WITH r, total_modules, count(DISTINCT c) AS total_classes
+OPTIONAL MATCH (f:Function {repository_id: r.id})
+WITH r, total_modules, total_classes, count(DISTINCT f) AS total_functions
+OPTIONAL MATCH (x:ExternalDependency {repository_id: r.id})
+WITH r, total_modules, total_classes, total_functions, count(DISTINCT x) AS total_externals
+OPTIONAL MATCH ()-[rel:CALLS {repository_id: r.id}]->()
+WITH r, total_modules, total_classes, total_functions, total_externals, count(DISTINCT rel) AS total_calls
+OPTIONAL MATCH ()-[route:ROUTES_TO {repository_id: r.id}]->()
+RETURN total_modules,
+       total_classes,
+       total_functions,
+       total_externals,
+       total_calls,
        count(DISTINCT route) AS total_routes
 """
 
@@ -166,6 +172,132 @@ def find_uncalled_functions(
     return client.execute_query(
         DEAD_CODE_CANDIDATES_QUERY, {"repository_id": repository_id}
     )
+
+
+def delete_repository_graph(client: Neo4jClient, repository_id: str) -> None:
+    """Detach and delete all nodes and relationships belonging to repository_id."""
+    cypher = """
+    MATCH (r:Repository {id: $repo_id})
+    OPTIONAL MATCH (n:Entity {repository_id: $repo_id})
+    DETACH DELETE n, r
+    """
+    client.execute_write(cypher, {"repo_id": repository_id})
+
+
+def find_entities(
+    client: Neo4jClient,
+    repository_id: str,
+    *,
+    kind: str | None = None,
+    file_path: str | None = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return paginated entity nodes filtered by kind and file_path."""
+    cypher = """
+    MATCH (e:Entity {repository_id: $repo_id})
+    WHERE ($kind IS NULL OR $kind IN labels(e))
+      AND ($file_path IS NULL OR e.file_path = $file_path)
+    RETURN e.id AS id,
+           e.repository_id AS repository_id,
+           e.name AS name,
+           e.qualified_name AS qualified_name,
+           [lbl IN labels(e) WHERE lbl <> 'Entity'][0] AS kind,
+           e.file_path AS file_path,
+           e.line AS line,
+           e.end_line AS end_line
+    ORDER BY e.qualified_name
+    SKIP $skip LIMIT $limit
+    """
+    return client.execute_query(
+        cypher,
+        {
+            "repo_id": repository_id,
+            "kind": kind,
+            "file_path": file_path,
+            "skip": skip,
+            "limit": limit,
+        },
+    )
+
+
+def get_entity_detail(
+    client: Neo4jClient,
+    repository_id: str,
+    entity_id: str,
+) -> dict[str, Any] | None:
+    """Return an entity node along with its incoming and outgoing relationships."""
+    node_cypher = """
+    MATCH (e:Entity {repository_id: $repo_id, id: $entity_id})
+    RETURN e.id AS id,
+           e.repository_id AS repository_id,
+           e.name AS name,
+           e.qualified_name AS qualified_name,
+           [lbl IN labels(e) WHERE lbl <> 'Entity'][0] AS kind,
+           e.file_path AS file_path,
+           e.line AS line,
+           e.end_line AS end_line
+    LIMIT 1
+    """
+    nodes = client.execute_query(node_cypher, {"repo_id": repository_id, "entity_id": entity_id})
+    if not nodes:
+        return None
+    entity = nodes[0]
+
+    incoming_cypher = """
+    MATCH (src:Entity)-[r]->(e:Entity {repository_id: $repo_id, id: $entity_id})
+    RETURN type(r) AS type,
+           src.id AS source_id,
+           src.qualified_name AS source_name,
+           properties(r) AS properties
+    LIMIT 200
+    """
+    incoming = client.execute_query(incoming_cypher, {"repo_id": repository_id, "entity_id": entity_id})
+
+    outgoing_cypher = """
+    MATCH (e:Entity {repository_id: $repo_id, id: $entity_id})-[r]->(dst:Entity)
+    RETURN type(r) AS type,
+           dst.id AS target_id,
+           dst.qualified_name AS target_name,
+           properties(r) AS properties
+    LIMIT 200
+    """
+    outgoing = client.execute_query(outgoing_cypher, {"repo_id": repository_id, "entity_id": entity_id})
+
+    return {
+        "entity": entity,
+        "incoming_relationships": incoming,
+        "outgoing_relationships": outgoing,
+    }
+
+
+def find_file_dependencies(
+    client: Neo4jClient,
+    repository_id: str,
+    file_path: str,
+) -> dict[str, Any]:
+    """Find files imported by and files importing the given file."""
+    outgoing_cypher = """
+    MATCH (m:Module {repository_id: $repo_id, file_path: $file_path})-[:IMPORTS]->(imp:Module)
+    WHERE imp.file_path IS NOT NULL AND imp.file_path <> $file_path
+    RETURN DISTINCT imp.file_path AS file
+    ORDER BY file
+    """
+    incoming_cypher = """
+    MATCH (src:Module {repository_id: $repo_id})-[:IMPORTS]->(m:Module {repository_id: $repo_id, file_path: $file_path})
+    WHERE src.file_path IS NOT NULL AND src.file_path <> $file_path
+    RETURN DISTINCT src.file_path AS file
+    ORDER BY file
+    """
+    out_files = client.execute_query(outgoing_cypher, {"repo_id": repository_id, "file_path": file_path})
+    in_files = client.execute_query(incoming_cypher, {"repo_id": repository_id, "file_path": file_path})
+
+    return {
+        "repository_id": repository_id,
+        "file_path": file_path,
+        "imported_files": [r["file"] for r in out_files if "file" in r],
+        "imported_by_files": [r["file"] for r in in_files if "file" in r],
+    }
 
 
 def get_repository_overview(

@@ -97,6 +97,21 @@ class Settings(BaseSettings):
             return "postgresql://" + url[len("postgres://"):]
         return url
 
+    def validate_production_readiness(self) -> list[str]:
+        """Validate critical security configurations for production environments.
+
+        Returns a list of validation failure descriptions, or empty list if valid.
+        """
+        errors = []
+        if self.app_env.lower() == "production":
+            if self.jwt_secret_key == "cypher-insecure-development-secret-key-change-in-production":
+                errors.append("Production requires a secure, non-default JWT_SECRET_KEY.")
+            if "sqlite" in self.database_url.lower():
+                errors.append("Production requires PostgreSQL (DATABASE_URL), SQLite is not allowed.")
+            if self.neo4j_password in ("password", "neo4j", ""):
+                errors.append("Production requires a strong NEO4J_PASSWORD.")
+        return errors
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

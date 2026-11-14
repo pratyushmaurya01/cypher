@@ -62,8 +62,42 @@ class ClassHierarchy(BaseModel):
 
 
 class DeadCodeCandidate(BaseModel):
-    """A function that appears to be never called."""
+    """A function that appears to be never called (heuristic)."""
 
     unused_function: str
     file: str | None = None
     line: int | None = None
+    note: str = Field(
+        default="Heuristic candidate: verified via static analysis, dynamic callers or external hooks may exist.",
+        description="Explains that dead code detection is heuristic.",
+    )
+
+
+class EntityItem(BaseModel):
+    """A graph entity node (Module, Class, Function, etc.)."""
+
+    id: str
+    repository_id: str | None = None
+    name: str
+    qualified_name: str
+    kind: str
+    file_path: str | None = None
+    line: int | None = None
+    end_line: int | None = None
+
+
+class EntityDetail(BaseModel):
+    """Detailed entity attributes and relationships."""
+
+    entity: EntityItem
+    incoming_relationships: list[dict] = Field(default_factory=list)
+    outgoing_relationships: list[dict] = Field(default_factory=list)
+
+
+class FileDependencies(BaseModel):
+    """Import and call relationships between files."""
+
+    repository_id: str
+    file_path: str
+    imported_files: list[str] = Field(default_factory=list)
+    imported_by_files: list[str] = Field(default_factory=list)

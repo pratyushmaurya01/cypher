@@ -30,6 +30,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage database and Neo4j connections for the application lifecycle."""
     settings = get_settings()
 
+    # Fail fast if production misconfigurations exist
+    prod_errors = settings.validate_production_readiness()
+    if prod_errors:
+        err_msg = "Production configuration validation failed: " + "; ".join(prod_errors)
+        logger.critical(err_msg)
+        raise RuntimeError(err_msg)
+
     # 1. Initialize Relational Database (PostgreSQL / SQLite)
     try:
         init_db()

@@ -40,24 +40,69 @@ class PathTraversalError(AnalysisServiceError):
     """Raised when a ZIP entry tries to escape the extraction directory."""
 
 
+class SuspiciousArchiveError(AnalysisServiceError):
+    """Raised when an archive exhibits characteristics of a ZIP bomb or contains forbidden content."""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _safe_extract(zip_path: Path, extract_dir: Path) -> None:
-    """Extract a ZIP file, rejecting any entries with path traversal attempts.
+MAX_ARCHIVE_FILE_COUNT = 10_000
+MAX_UNCOMPRESSED_SIZE_BYTES = 250 * 1024 * 1024  # 250 MB
+MAX_COMPRESSION_RATIO = 100.0
 
-    A ZIP file could contain entries like ``../../etc/passwd``.  We check
-    every entry before extracting to prevent writing outside ``extract_dir``.
+
+def _safe_extract(zip_path: Path, extract_dir: Path) -> None:
+    """Extract a ZIP file with path traversal and ZIP bomb defense.
+
+    Validates:
+      1. Entry count does not exceed limit (e.g. 10,000).
+      2. Cumulative uncompressed size does not exceed limit (e.g. 250 MB).
+      3. No individual file has an extreme compression ratio (> 100x).
+      4. No nested archive files (.zip, .tar, .gz).
+      5. No directory traversal entries (escaping extract_dir).
     """
+    extract_root = extract_dir.resolve()
     with zipfile.ZipFile(zip_path, "r") as zf:
-        for member in zf.namelist():
-            # Resolve the full target path and confirm it stays inside extract_dir
-            target = (extract_dir / member).resolve()
-            if not target.is_relative_to(extract_dir.resolve()):
-                raise PathTraversalError(
-                    f"ZIP entry '{member}' would escape the extraction directory."
+        infolist = zf.infolist()
+        if len(infolist) > MAX_ARCHIVE_FILE_COUNT:
+            raise SuspiciousArchiveError(
+                f"Archive contains {len(infolist)} files, exceeding limit of {MAX_ARCHIVE_FILE_COUNT}."
+            )
+
+        total_uncompressed = 0
+        for info in infolist:
+            total_uncompressed += info.file_size
+            if total_uncompressed > MAX_UNCOMPRESSED_SIZE_BYTES:
+                raise SuspiciousArchiveError(
+                    f"Total uncompressed archive size exceeds maximum limit of "
+                    f"{MAX_UNCOMPRESSED_SIZE_BYTES // (1024 * 1024)} MB."
                 )
+
+            # Check compression ratio for non-trivial files (> 10 KB uncompressed)
+            if info.file_size > 10 * 1024:
+                compressed_size = max(info.compress_size, 1)
+                ratio = info.file_size / compressed_size
+                if ratio > MAX_COMPRESSION_RATIO:
+                    raise SuspiciousArchiveError(
+                        f"Archive entry '{info.filename}' has excessive compression ratio ({ratio:.1f}x)."
+                    )
+
+            # Reject nested archives
+            lower_name = info.filename.lower()
+            if any(lower_name.endswith(ext) for ext in (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2")):
+                raise SuspiciousArchiveError(
+                    f"Nested archive detected in upload: '{info.filename}'."
+                )
+
+            # Resolve full target path and confirm it stays inside extract_dir
+            target = (extract_root / info.filename).resolve()
+            if not target.is_relative_to(extract_root):
+                raise PathTraversalError(
+                    f"ZIP entry '{info.filename}' would escape the extraction directory."
+                )
+
         zf.extractall(extract_dir)
 
 
