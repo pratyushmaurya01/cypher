@@ -22,11 +22,16 @@ class GraphBuilder:
     def __init__(self, client: Neo4jClient | None = None) -> None:
         self.client = client
 
-    def build_payload(self, analysis_result: dict[str, Any]) -> dict[str, Any]:
+    def build_payload(
+        self,
+        analysis_result: dict[str, Any],
+        *,
+        repository_id: str | None = None,
+    ) -> dict[str, Any]:
         """Prepares parameterized batches for nodes and relationships without executing them."""
         repo_meta = analysis_result.get("repository", {})
         repo_root = repo_meta.get("root", "")
-        repo_id = _stable_id("repo", repo_root or "root")
+        repo_id = repository_id or repo_meta.get("id") or _stable_id("repo", repo_root or "root")
 
         repo_node = {
             "id": repo_id,
@@ -144,9 +149,10 @@ class GraphBuilder:
         *,
         dry_run: bool = False,
         clear_existing_repo: bool = False,
+        repository_id: str | None = None,
     ) -> dict[str, Any]:
         """Ingests the static analysis graph into Neo4j with idempotent MERGE operations."""
-        payload = self.build_payload(analysis_result)
+        payload = self.build_payload(analysis_result, repository_id=repository_id)
 
         total_nodes = (
             1  # Repository

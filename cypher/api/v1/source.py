@@ -28,6 +28,7 @@ from cypher.schemas.source import (
     SymbolSourceResponse,
 )
 from cypher.services.source_code_service import (
+    FileTooLargeError,
     InvalidLineRangeError,
     PathTraversalError,
     RepositoryNotFoundError,
@@ -81,6 +82,11 @@ def get_file(
 
     try:
         res = service.get_file_content(snapshot_dir, path)
+    except FileTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        )
     except PathTraversalError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except (SourceFileNotFoundError, RepositoryNotFoundError) as exc:

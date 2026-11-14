@@ -54,7 +54,7 @@ def _safe_extract(zip_path: Path, extract_dir: Path) -> None:
         for member in zf.namelist():
             # Resolve the full target path and confirm it stays inside extract_dir
             target = (extract_dir / member).resolve()
-            if not str(target).startswith(str(extract_dir.resolve())):
+            if not target.is_relative_to(extract_dir.resolve()):
                 raise PathTraversalError(
                     f"ZIP entry '{member}' would escape the extraction directory."
                 )
@@ -129,6 +129,7 @@ def run_analysis(
     repo_root: Path,
     neo4j_client: Neo4jClient,
     *,
+    repository_id: str | None = None,
     clear_existing: bool = True,
 ) -> dict[str, Any]:
     """Run the full analysis pipeline and ingest results into Neo4j.
@@ -156,6 +157,7 @@ def run_analysis(
     ingestion_summary = builder.ingest(
         graph_data,
         clear_existing_repo=clear_existing,
+        repository_id=repository_id,
     )
 
     logger.info("Ingestion complete: %s", ingestion_summary)

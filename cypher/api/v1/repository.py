@@ -13,6 +13,7 @@ GET /api/v1/repository/{repository_id}
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import tempfile
 from pathlib import Path
@@ -104,6 +105,12 @@ async def upload_and_analyze(
     neo4j_client = _get_neo4j_client(request)
 
     # Determine acting owner: authenticated user, or fallback dev user
+    if not settings.effective_allow_anonymous_dev and current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to upload and analyze repositories.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     owner = current_user or _get_or_create_default_dev_user(db)
 
     # Read file into memory
@@ -139,18 +146,61 @@ async def upload_and_analyze(
                 detail="No Python files found inside the uploaded ZIP.",
             )
 
-        try:
-            result = run_analysis(python_root, neo4j_client, clear_existing=True)
-            repo_id = result["repository_id"]
+        # Derive stable repository identity from owner and repo_name
+        repo_id = f"repo_{hashlib.sha256(f'{owner.id}:{repo_name}'.encode('utf-8')).hexdigest()[:16]}"
 
-            # Persist immutable repository snapshot before temp directory is deleted
+        # Pre-ingestion ownership validation
+        existing_repo = (
+            db.query(RepositoryMetadata)
+            .filter(RepositoryMetadata.repository_id == repo_id)
+            .first()
+        )
+        if existing_repo is not None and existing_repo.owner_id != owner.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="A repository with this identifier is already owned by another account.",
+            )
+
+        next_version = (existing_repo.current_version + 1) if existing_repo else 1
+
+        try:
+            # Step 1: Store persistent immutable versioned snapshot
             from cypher.services.source_code_service import SourceCodeService
             source_service = SourceCodeService()
             snapshot_path = source_service.store_snapshot(
                 source_dir=python_root,
                 owner_id=owner.id,
                 repository_id=repo_id,
+                version=next_version,
             )
+
+            # Step 2: Run AST analysis and Neo4j graph ingestion
+            result = run_analysis(
+                python_root,
+                neo4j_client,
+                repository_id=repo_id,
+                clear_existing=True,
+            )
+            # If result returned a different repo_id (e.g. mocked in older tests), preserve compatibility
+            returned_id = result.get("repository_id")
+            if returned_id and returned_id != repo_id:
+                # Check ownership of returned_id if mocked
+                alt_existing = (
+                    db.query(RepositoryMetadata)
+                    .filter(RepositoryMetadata.repository_id == returned_id)
+                    .first()
+                )
+                if alt_existing is not None and alt_existing.owner_id != owner.id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="A repository with this identifier is already owned by another account.",
+                    )
+                repo_id = returned_id
+                existing_repo = alt_existing
+                next_version = (existing_repo.current_version + 1) if existing_repo else 1
+
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error("Analysis failed for '%s': %s", repo_name, exc, exc_info=True)
             raise HTTPException(
@@ -160,21 +210,6 @@ async def upload_and_analyze(
                 else str(exc),
             )
 
-    repo_id = result["repository_id"]
-
-    # Check if this repository_id was already claimed by another user
-    existing_repo = (
-        db.query(RepositoryMetadata)
-        .filter(RepositoryMetadata.repository_id == repo_id)
-        .first()
-    )
-    if existing_repo is not None and existing_repo.owner_id != owner.id:
-        # Cross-user conflict check
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="A repository with this identifier is already owned by another account.",
-        )
-
     if existing_repo is None:
         repo_record = RepositoryMetadata(
             repository_id=repo_id,
@@ -182,12 +217,14 @@ async def upload_and_analyze(
             name=repo_name,
             storage_path=str(snapshot_path),
             status="analyzed",
+            current_version=next_version,
         )
         db.add(repo_record)
     else:
         existing_repo.name = repo_name
         existing_repo.storage_path = str(snapshot_path)
         existing_repo.status = "analyzed"
+        existing_repo.current_version = next_version
     db.commit()
 
     analysis_stats = result["analysis"]

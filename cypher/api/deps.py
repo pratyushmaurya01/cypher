@@ -55,7 +55,11 @@ def get_current_user_optional(
     token: Annotated[str | None, Depends(oauth2_scheme)],
     db: Annotated[Session, Depends(get_db)],
 ) -> User | None:
-    """Return the authenticated User if token is provided, or None."""
+    """Return the authenticated User if token is provided, or None.
+
+    In production mode, anonymous access is not allowed; endpoints depending on
+    an owner will reject unauthenticated calls.
+    """
     if not token:
         return None
     try:
@@ -102,13 +106,25 @@ def check_graph_access(
 ) -> RepositoryMetadata | None:
     """Enforce cross-user data isolation for graph queries.
 
+    - In production, unauthenticated requests are always rejected with 401 Unauthorized.
     - If the repository is registered under a registered user:
         - An unauthenticated request is rejected with 401 Unauthorized.
         - A request from another user is rejected with 403 Forbidden.
         - A request from the owner is permitted.
-    - If the repository is owned by dev-anonymous or not yet in registry:
-        - Permitted for backwards compatibility in local dev/mock test suites.
+    - If in development and effective_allow_anonymous_dev is True:
+        - Repositories owned by dev-anonymous or not yet in registry are permitted
+          for backwards compatibility with local dev and mock test suites.
     """
+    from cypher.config import get_settings
+    settings = get_settings()
+
+    if not settings.effective_allow_anonymous_dev and current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to access repository graph data in production.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     repo = (
         db.query(RepositoryMetadata)
         .filter(RepositoryMetadata.repository_id == repository_id)
@@ -117,7 +133,7 @@ def check_graph_access(
     if repo is not None:
         if current_user is None:
             owner = db.query(User).filter(User.id == repo.owner_id).first()
-            if owner and owner.email == "dev-anonymous@cypher.local":
+            if owner and owner.email == "dev-anonymous@cypher.local" and settings.effective_allow_anonymous_dev:
                 return repo
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

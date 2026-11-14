@@ -59,6 +59,7 @@ class RepositoryMetadata(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     status: Mapped[str] = mapped_column(String(64), default="analyzed", nullable=False)
+    current_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False

@@ -55,5 +55,6 @@ class RepositoryListItem(BaseModel):
     repository_id: str
     name: str
     status: str
+    current_version: int = 1
     storage_path: Optional[str] = None
     created_at: datetime

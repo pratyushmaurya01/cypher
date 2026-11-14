@@ -34,6 +34,10 @@ class PathTraversalError(SourceCodeError):
     """Raised when a file path attempts to escape the repository directory."""
 
 
+class FileTooLargeError(SourceCodeError):
+    """Raised when a requested file exceeds the configured maximum byte limit."""
+
+
 class RepositoryNotFoundError(SourceCodeError):
     """Raised when repository snapshot directory is not found on disk."""
 
@@ -57,9 +61,10 @@ class SymbolNotFoundError(SourceCodeError):
 def _resolve_safe_path(snapshot_dir: Path, relative_path: str) -> Path:
     """Validate and resolve a relative file path safely within the snapshot directory.
 
-    Guarantees no directory traversal (e.g. using '../../' or absolute paths).
+    Guarantees no directory traversal (e.g. using '../../', absolute paths, or symlink escapes).
     """
-    if not snapshot_dir.exists() or not snapshot_dir.is_dir():
+    snapshot_root = snapshot_dir.resolve()
+    if not snapshot_root.exists() or not snapshot_root.is_dir():
         raise RepositoryNotFoundError(
             f"Repository snapshot directory does not exist: {snapshot_dir}"
         )
@@ -69,11 +74,18 @@ def _resolve_safe_path(snapshot_dir: Path, relative_path: str) -> Path:
     if any(part == ".." or part.startswith("/") for part in clean_parts):
         raise PathTraversalError(f"Path traversal detected in path: '{relative_path}'")
 
-    target_path = (snapshot_dir / Path(*clean_parts)).resolve()
-    snapshot_root = snapshot_dir.resolve()
+    target_path = (snapshot_root / Path(*clean_parts)).resolve()
 
-    if not str(target_path).startswith(str(snapshot_root)):
+    if not target_path.is_relative_to(snapshot_root):
         raise PathTraversalError(f"Target path escapes snapshot root: '{relative_path}'")
+
+    # In case the file itself is a symlink, ensure its resolved target also stays inside snapshot_root
+    try:
+        raw_target = snapshot_root / Path(*clean_parts)
+        if raw_target.is_symlink() and not raw_target.resolve().is_relative_to(snapshot_root):
+            raise PathTraversalError(f"Symlink target escapes snapshot root: '{relative_path}'")
+    except OSError:
+        pass
 
     if not target_path.exists() or not target_path.is_file():
         raise SourceFileNotFoundError(f"File '{relative_path}' not found in repository.")
@@ -109,6 +121,48 @@ def _read_file_text(path: Path) -> tuple[str, str]:
         return raw_bytes.decode("utf-8", errors="replace"), "utf-8-replace"
 
 
+def _find_symbol_in_tree(
+    tree: ast.AST,
+    module_dot_path: str,
+    target_qualified_name: str,
+    rel_path: str,
+) -> tuple[str, int, int, str, str] | None:
+    """Recursively search an AST with lexical scope stack for target_qualified_name."""
+    scope_stack: list[str] = []
+
+    def _walk(node: ast.AST) -> tuple[str, int, int, str, str] | None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                child_name = child.name
+                scope_stack.append(child_name)
+
+                scoped_name = ".".join(scope_stack)
+                full_mod_scoped_name = f"{module_dot_path}.{scoped_name}" if module_dot_path else scoped_name
+
+                # Check if matches target
+                if (
+                    target_qualified_name == full_mod_scoped_name
+                    or target_qualified_name == scoped_name
+                    or (len(scope_stack) == 1 and target_qualified_name == child_name)
+                ):
+                    end_ln = getattr(child, "end_lineno", child.lineno)
+                    kind = (
+                        "class"
+                        if isinstance(child, ast.ClassDef)
+                        else ("async_function" if isinstance(child, ast.AsyncFunctionDef) else "function")
+                    )
+                    return rel_path, child.lineno, end_ln, kind, child_name
+
+                # Recurse into child
+                res = _walk(child)
+                scope_stack.pop()
+                if res is not None:
+                    return res
+        return None
+
+    return _walk(tree)
+
+
 # ---------------------------------------------------------------------------
 # SourceCodeService
 # ---------------------------------------------------------------------------
@@ -121,35 +175,71 @@ class SourceCodeService:
             Path(storage_dir) if storage_dir else Path(get_settings().storage_dir)
         )
 
-    def get_snapshot_path(self, owner_id: int | str, repository_id: str) -> Path:
-        """Return the canonical directory for a repository's persistent snapshot."""
-        return (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
+    def get_snapshot_path(
+        self,
+        owner_id: int | str,
+        repository_id: str,
+        version: int | None = None,
+    ) -> Path:
+        """Return the canonical directory for a repository's persistent snapshot.
+
+        If version is specified, returns the specific version directory snapshots/v{version}.
+        Otherwise returns the current active snapshot directory.
+        """
+        repo_base = (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
+        if version is not None:
+            return repo_base / "snapshots" / f"v{version}"
+        current_dir = repo_base / "current"
+        if current_dir.exists():
+            return current_dir
+        # Backwards-compatible check: if legacy directory exists directly at repo_base
+        if repo_base.exists() and not (repo_base / "snapshots").exists():
+            return repo_base
+        return current_dir
 
     def store_snapshot(
         self,
         source_dir: Path,
         owner_id: int | str,
         repository_id: str,
+        version: int | None = None,
     ) -> Path:
-        """Copy extracted repository files into persistent, immutable storage.
+        """Copy extracted repository files into persistent, immutable versioned storage.
 
-        Overwrites any previous snapshot for this repository.
+        Preserves past versions under snapshots/v{version}/ and points 'current' to the latest.
         Returns the absolute Path of the stored snapshot.
         """
-        dest_dir = self.get_snapshot_path(owner_id, repository_id)
+        repo_base = (self.storage_dir / str(owner_id) / str(repository_id)).resolve()
+        snapshots_dir = repo_base / "snapshots"
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Clear existing snapshot if re-analyzing
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
+        # Determine version number
+        if version is None:
+            existing_versions = []
+            for d in snapshots_dir.iterdir():
+                if d.is_dir() and d.name.startswith("v") and d.name[1:].isdigit():
+                    existing_versions.append(int(d.name[1:]))
+            version = max(existing_versions) + 1 if existing_versions else 1
 
-        dest_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_dir, dest_dir)
+        version_dir = snapshots_dir / f"v{version}"
+        if version_dir.exists():
+            shutil.rmtree(version_dir, ignore_errors=True)
+        version_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_dir, version_dir, dirs_exist_ok=True)
+
+        # Update 'current' directory snapshot
+        current_dir = repo_base / "current"
+        if current_dir.exists():
+            shutil.rmtree(current_dir, ignore_errors=True)
+        shutil.copytree(version_dir, current_dir, dirs_exist_ok=True)
+
         logger.info(
-            "Stored persistent repository snapshot for repo '%s' at: %s",
+            "Stored immutable persistent repository snapshot for repo '%s' v%d at: %s",
             repository_id,
-            dest_dir,
+            version,
+            version_dir,
         )
-        return dest_dir
+        return version_dir
 
     def get_file_content(
         self,
@@ -162,6 +252,14 @@ class SourceCodeService:
             dict containing: file_path, content, total_lines, size_bytes, encoding.
         """
         target_file = _resolve_safe_path(snapshot_dir, relative_path)
+        settings = get_settings()
+        file_size = target_file.stat().st_size
+        if file_size > settings.max_source_file_bytes:
+            raise FileTooLargeError(
+                f"File '{relative_path}' size ({file_size} bytes) exceeds maximum "
+                f"allowed limit ({settings.max_source_file_bytes} bytes)."
+            )
+
         content, encoding = _read_file_text(target_file)
         lines = content.splitlines(keepends=True)
 
@@ -172,7 +270,7 @@ class SourceCodeService:
             "file_path": clean_rel,
             "content": content,
             "total_lines": len(lines),
-            "size_bytes": target_file.stat().st_size,
+            "size_bytes": file_size,
             "encoding": encoding,
         }
 
@@ -216,6 +314,13 @@ class SourceCodeService:
             )
 
         actual_end = min(end_line, total_lines) if end_line is not None else total_lines
+        range_count = actual_end - start_line + 1
+        settings = get_settings()
+        if range_count > settings.max_range_lines:
+            raise InvalidLineRangeError(
+                f"Requested range of {range_count} lines exceeds the maximum limit "
+                f"of {settings.max_range_lines} lines."
+            )
 
         # 1-indexed to 0-indexed slicing
         extracted_slice = all_lines[start_line - 1 : actual_end]
@@ -312,9 +417,14 @@ class SourceCodeService:
         snapshot_dir: Path,
         qualified_name: str,
     ) -> tuple[str, int, int, str, str] | None:
-        """Search Python files in snapshot_dir for a function or class definition."""
-        parts = qualified_name.split(".")
+        """Search Python files in snapshot_dir for a function, class, or method definition.
 
+        Uses lexical scope tracking to accurately resolve qualified names like:
+        - top-level function: 'hello' or 'users.views.hello'
+        - class: 'User' or 'users.models.User'
+        - method: 'User.save' or 'users.models.User.save'
+        - nested function/class: 'outer.inner' or 'ClassA.NestedClass.method'
+        """
         for py_file in snapshot_dir.rglob("*.py"):
             try:
                 code_text, _ = _read_file_text(py_file)
@@ -324,16 +434,17 @@ class SourceCodeService:
 
             rel_path = str(py_file.relative_to(snapshot_dir.resolve())).replace("\\", "/")
 
-            # Traverse top-level definitions
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    # Match by node name if qualified matches either full or end segment
-                    if node.name == parts[-1]:
-                        end_ln = getattr(node, "end_lineno", node.lineno)
-                        kind = (
-                            "class"
-                            if isinstance(node, ast.ClassDef)
-                            else ("async_function" if isinstance(node, ast.AsyncFunctionDef) else "function")
-                        )
-                        return rel_path, node.lineno, end_ln, kind, node.name
+            # Construct module dotted path: e.g. "users/views.py" -> "users.views"
+            mod_parts = list(py_file.relative_to(snapshot_dir.resolve()).parts)
+            if mod_parts[-1].endswith(".py"):
+                mod_parts[-1] = mod_parts[-1][:-3]
+            if mod_parts[-1] == "__init__":
+                mod_parts.pop()
+            module_dot_path = ".".join(mod_parts)
+
+            # Traverse AST maintaining scope stack
+            found = _find_symbol_in_tree(tree, module_dot_path, qualified_name, rel_path)
+            if found:
+                return found
+
         return None

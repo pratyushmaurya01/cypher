@@ -55,20 +55,34 @@ class Settings(BaseSettings):
     # Maximum allowed size for a ZIP upload (bytes).  Default: 50 MB.
     max_upload_bytes: int = 50 * 1024 * 1024
 
+    # Maximum allowed size for direct source file retrieval (bytes). Default: 2 MB.
+    max_source_file_bytes: int = 2 * 1024 * 1024
+
+    # Maximum allowed lines returned in a single range retrieval. Default: 1000 lines.
+    max_range_lines: int = 1000
+
     # ------------------------------------------------------------------ #
-    # Application
+    # Application & Security
     # ------------------------------------------------------------------ #
     # Comma-separated list of allowed CORS origins.
     # Example: "http://localhost:3000,http://localhost:5173"
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
     # Set to "development" or "production".
-    # In production mode raw exception details are hidden from API responses.
+    # In production mode raw exception details and anonymous access are disabled.
     app_env: str = "development"
+
+    # Allow anonymous development access without JWT token (strictly ignored in production).
+    allow_anonymous_dev_access: bool = True
 
     @property
     def is_development(self) -> bool:
         return self.app_env.lower() == "development"
+
+    @property
+    def effective_allow_anonymous_dev(self) -> bool:
+        """In production, anonymous access is strictly forbidden."""
+        return self.is_development and self.allow_anonymous_dev_access
 
     @property
     def cors_origins_list(self) -> list[str]:
