@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Meri Todo List</h2>
+<form method="post">
+  {% csrf_token %}
+  {{ form.title }}
+  {{ form.title.errors }}
+  <button type="submit">Add</button>
+</form>
+
+<ul>
+  {% for todo in todos %}
+    <li class="{% if todo.is_done %}done{% endif %}">
+      <span class="title">{{ todo.title }}</span>
+      <span>
+        <form method="post" action="{% url 'toggle_todo' todo.pk %}">
+          {% csrf_token %}
+          <button type="submit">{% if todo.is_done %}Undo{% else %}Done{% endif %}</button>
+        </form>
+        <form method="post" action="{% url 'delete_todo' todo.pk %}">
+          {% csrf_token %}
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </span>
+    </li>
+  {% empty %}
+    <li>Abhi koi task nahi hai.</li>
+  {% endfor %}
+</ul>
+{% endblock %}
