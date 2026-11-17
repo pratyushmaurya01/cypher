@@ -3,4 +3,10 @@ venv/
 __pycache__/
 *.py[cod]
 .env
+*.db
+cypher.db
+storage/
 .pytest_cache/
+test.py
+chroma_db/
+.chroma/
