@@ -16,6 +16,9 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pathlib import Path
 
 from cypher.api.routes import api_router
 from cypher.config import get_settings
@@ -97,6 +100,18 @@ def create_app() -> FastAPI:
 
     # Mount all API routes under /api/v1
     app.include_router(api_router, prefix="/api/v1")
+
+    # Serve static UI files and root index.html
+    static_dir = Path(__file__).resolve().parent.parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+        @app.get("/", include_in_schema=False)
+        def read_root():
+            index_path = static_dir / "index.html"
+            if index_path.exists():
+                return FileResponse(str(index_path))
+            return {"message": "Cypher API is online. Static UI not found."}
 
     return app
 

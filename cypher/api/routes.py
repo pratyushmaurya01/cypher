@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from cypher.api.v1 import auth, graph, health, repository, source
+from cypher.api.v1 import auth, chat, graph, health, repository, source
 
 api_router = APIRouter()
 
@@ -26,3 +26,6 @@ api_router.include_router(graph.router)
 
 # Source code snapshot and line range retrieval
 api_router.include_router(source.router)
+
+# Hybrid RAG chat question-answering
+api_router.include_router(chat.router)

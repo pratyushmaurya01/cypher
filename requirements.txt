@@ -11,3 +11,6 @@ alembic
 psycopg2-binary
 bcrypt
 pyjwt
+# Stage 5 — RAG dependencies
+chromadb
+google-generativeai

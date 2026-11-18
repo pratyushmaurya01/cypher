@@ -255,6 +255,22 @@ async def upload_and_analyze(
         existing_repo.current_version = next_version
     db.commit()
 
+    # --- RAG: auto-index repository for semantic search (non-fatal) ---
+    if settings.rag_enabled:
+        try:
+            from cypher.services.rag_service import RAGService
+            RAGService().index_repository(
+                repository_id=repo_id,
+                owner_id=owner.id,
+                snapshot_dir=snapshot_path,
+            )
+            logger.info("RAG vector index created for repo '%s'", repo_id)
+        except Exception as exc:
+            logger.warning(
+                "RAG indexing failed for repo '%s' (non-fatal, repo still analyzed): %s",
+                repo_id, exc,
+            )
+
     analysis_stats = result["analysis"]
     ingestion_stats = result["ingestion"]
 
@@ -352,6 +368,17 @@ def delete_repository(
         import shutil
         shutil.rmtree(repo_base, ignore_errors=True)
         logger.info("Deleted filesystem snapshot storage at '%s'", repo_base)
+
+    # 4. ChromaDB vector index removal (non-fatal)
+    try:
+        from cypher.services.rag_service import RAGService
+        RAGService().delete_index(repository_id)
+        logger.info("Deleted ChromaDB vector index for repository '%s'", repository_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed to delete ChromaDB index for '%s' (non-fatal): %s",
+            repository_id, exc,
+        )
 
     return {
         "status": "deleted",

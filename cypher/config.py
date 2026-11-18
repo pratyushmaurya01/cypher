@@ -75,6 +75,44 @@ class Settings(BaseSettings):
     # Allow anonymous development access without JWT token (strictly ignored in production).
     allow_anonymous_dev_access: bool = True
 
+    # ------------------------------------------------------------------ #
+    # Stage 5 — Gemini API (LLM + Embeddings)
+    # ------------------------------------------------------------------ #
+    # Google Gemini API key — set in .env as GEMINI_API_KEY
+    gemini_api_key: str = ""
+
+    # Generation model (verified working via LangChain)
+    gemini_model: str = "gemini-3.5-flash-lite"
+
+    # Embedding model (verified working via LangChain)
+    gemini_embedding_model: str = "gemini-embedding-001"
+
+    # Dimensionality output by gemini-embedding-001
+    gemini_embedding_dimensions: int = 3072
+
+    # Maximum tokens to include in context sent to LLM
+    rag_context_max_tokens: int = 12000
+
+    # Top-K chunks to retrieve from vector search per query
+    rag_vector_top_k: int = 8
+
+    # Top-K graph entities to retrieve per traversal
+    rag_graph_top_k: int = 10
+
+    # Maximum snippets after RRF fusion to include in context
+    rag_max_evidence: int = 12
+
+    # ------------------------------------------------------------------ #
+    # Stage 5 — ChromaDB Vector Store
+    # ------------------------------------------------------------------ #
+    # Directory for persistent ChromaDB storage
+    chroma_persist_dir: str = "./chroma_db"
+
+    @property
+    def rag_enabled(self) -> bool:
+        """RAG features require a Gemini API key."""
+        return bool(self.gemini_api_key)
+
     @property
     def is_development(self) -> bool:
         return self.app_env.lower() == "development"

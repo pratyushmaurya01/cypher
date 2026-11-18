@@ -1,0 +1,373 @@
+[
+  {
+    "query_id": "EN-01",
+    "question": "How does user authentication and login work in this project?",
+    "language": "english",
+    "intent": "architecture_overview",
+    "expected_symbols": [
+      "LoginView",
+      "login",
+      "authenticate"
+    ],
+    "expected_files": [
+      "users/views.py",
+      "users/urls.py"
+    ],
+    "description": "Core authentication workflow tracing from view to service"
+  },
+  {
+    "query_id": "EN-02",
+    "question": "Which URL route maps to the user registration endpoint?",
+    "language": "english",
+    "intent": "find_route",
+    "expected_symbols": [
+      "RegisterView",
+      "register"
+    ],
+    "expected_files": [
+      "users/urls.py",
+      "users/views.py"
+    ],
+    "description": "Route-to-view mapping resolution"
+  },
+  {
+    "query_id": "EN-03",
+    "question": "What fields and relationships are defined on the Profile model?",
+    "language": "english",
+    "intent": "explain_model",
+    "expected_symbols": [
+      "Profile",
+      "User"
+    ],
+    "expected_files": [
+      "users/models.py"
+    ],
+    "description": "ORM model structure and foreign keys"
+  },
+  {
+    "query_id": "EN-04",
+    "question": "Where is the database session or connection configured?",
+    "language": "english",
+    "intent": "locate_symbol",
+    "expected_symbols": [
+      "DATABASES",
+      "settings"
+    ],
+    "expected_files": [
+      "config/settings.py",
+      "settings.py"
+    ],
+    "description": "Configuration and database settings discovery"
+  },
+  {
+    "query_id": "EN-05",
+    "question": "What functions or views call get_user_by_email?",
+    "language": "english",
+    "intent": "trace_calls",
+    "expected_symbols": [
+      "get_user_by_email",
+      "LoginView"
+    ],
+    "expected_files": [
+      "users/services.py",
+      "users/views.py"
+    ],
+    "description": "Inverted caller graph traversal"
+  },
+  {
+    "query_id": "EN-06",
+    "question": "What breaks if I change the signature of authenticate_user?",
+    "language": "english",
+    "intent": "impact_analysis",
+    "expected_symbols": [
+      "authenticate_user",
+      "LoginView"
+    ],
+    "expected_files": [
+      "users/services.py",
+      "users/views.py"
+    ],
+    "description": "Impact radius and caller analysis"
+  },
+  {
+    "query_id": "EN-07",
+    "question": "List all Django views handling HTTP requests in the users app.",
+    "language": "english",
+    "intent": "architecture_overview",
+    "expected_symbols": [
+      "LoginView",
+      "RegisterView",
+      "ProfileView"
+    ],
+    "expected_files": [
+      "users/views.py"
+    ],
+    "description": "Module-level entity enumeration"
+  },
+  {
+    "query_id": "EN-08",
+    "question": "Does this repository have any circular imports between models and services?",
+    "language": "english",
+    "intent": "architecture_overview",
+    "expected_symbols": [
+      "models",
+      "services"
+    ],
+    "expected_files": [
+      "users/models.py",
+      "users/services.py"
+    ],
+    "description": "Import graph dependency cycle analysis"
+  },
+  {
+    "query_id": "HI-01",
+    "question": "इस प्रोजेक्ट में लॉगिन कैसे काम करता है?",
+    "language": "hindi",
+    "intent": "architecture_overview",
+    "expected_symbols": [
+      "LoginView",
+      "login"
+    ],
+    "expected_files": [
+      "users/views.py",
+      "users/urls.py"
+    ],
+    "description": "Pure Hindi authentication flow query"
+  },
+  {
+    "query_id": "HI-02",
+    "question": "प्रोफाइल मॉडल में कौन से फील्ड्स हैं?",
+    "language": "hindi",
+    "intent": "explain_model",
+    "expected_symbols": [
+      "Profile",
+      "user"
+    ],
+    "expected_files": [
+      "users/models.py"
+    ],
+    "description": "Pure Hindi model schema inspection"
+  },
+  {
+    "query_id": "HI-03",
+    "question": "रजिस्ट्रेशन का यूआरएल किस व्यू से जुड़ा हुआ है?",
+    "language": "hindi",
+    "intent": "find_route",
+    "expected_symbols": [
+      "RegisterView",
+      "register"
+    ],
+    "expected_files": [
+      "users/urls.py",
+      "users/views.py"
+    ],
+    "description": "Pure Hindi route-to-view lookup"
+  },
+  {
+    "query_id": "HI-04",
+    "question": "अगर यूजर मॉडल को बदलें तो कौन से कोड पर असर पड़ेगा?",
+    "language": "hindi",
+    "intent": "impact_analysis",
+    "expected_symbols": [
+      "User",
+      "Profile"
+    ],
+    "expected_files": [
+      "users/models.py",
+      "users/views.py"
+    ],
+    "description": "Pure Hindi impact analysis query"
+  },
+  {
+    "query_id": "HI-05",
+    "question": "पासवर्ड हैशिंग किस फाइल में की गई है?",
+    "language": "hindi",
+    "intent": "locate_symbol",
+    "expected_symbols": [
+      "make_password",
+      "check_password",
+      "set_password"
+    ],
+    "expected_files": [
+      "users/services.py",
+      "users/models.py"
+    ],
+    "description": "Pure Hindi security implementation location query"
+  },
+  {
+    "query_id": "HG-01",
+    "question": "User class badal dun to kya kya break hoga?",
+    "language": "hinglish",
+    "intent": "impact_analysis",
+    "expected_symbols": [
+      "User",
+      "Profile",
+      "LoginView"
+    ],
+    "expected_files": [
+      "users/models.py",
+      "users/views.py"
+    ],
+    "description": "Classic Hinglish impact query testing multi-hop traversal"
+  },
+  {
+    "query_id": "HG-02",
+    "question": "Login flow kahan se start hota hai aur kahan end hota hai?",
+    "language": "hinglish",
+    "intent": "trace_calls",
+    "expected_symbols": [
+      "urls.py",
+      "LoginView",
+      "authenticate"
+    ],
+    "expected_files": [
+      "users/urls.py",
+      "users/views.py"
+    ],
+    "description": "Cross-file execution flow query in colloquial Hinglish"
+  },
+  {
+    "query_id": "HG-03",
+    "question": "Registration view kaunse model ko call karta hai save karne ke liye?",
+    "language": "hinglish",
+    "intent": "trace_calls",
+    "expected_symbols": [
+      "RegisterView",
+      "User"
+    ],
+    "expected_files": [
+      "users/views.py",
+      "users/models.py"
+    ],
+    "description": "View-to-model instantiation tracking in Hinglish"
+  },
+  {
+    "query_id": "HG-04",
+    "question": "Kaun kaun se routes define hai users app mein?",
+    "language": "hinglish",
+    "intent": "find_route",
+    "expected_symbols": [
+      "urlpatterns",
+      "path"
+    ],
+    "expected_files": [
+      "users/urls.py"
+    ],
+    "description": "Hinglish URL declaration survey"
+  },
+  {
+    "query_id": "HG-05",
+    "question": "Profile model ka User ke sath kya relation hai foreign key ya one-to-one?",
+    "language": "hinglish",
+    "intent": "explain_model",
+    "expected_symbols": [
+      "Profile",
+      "OneToOneField",
+      "ForeignKey"
+    ],
+    "expected_files": [
+      "users/models.py"
+    ],
+    "description": "Relationship semantics in Hinglish"
+  },
+  {
+    "query_id": "HG-06",
+    "question": "get_user_by_email kis file me likha hai aur kya return karta hai?",
+    "language": "hinglish",
+    "intent": "locate_symbol",
+    "expected_symbols": [
+      "get_user_by_email"
+    ],
+    "expected_files": [
+      "users/services.py",
+      "users/repository.py"
+    ],
+    "description": "Targeted symbol lookup in Hinglish"
+  },
+  {
+    "query_id": "HG-07",
+    "question": "Project me custom middleware ya decorators use hue hain kya?",
+    "language": "hinglish",
+    "intent": "architecture_overview",
+    "expected_symbols": [
+      "middleware",
+      "login_required"
+    ],
+    "expected_files": [
+      "config/settings.py",
+      "users/views.py"
+    ],
+    "description": "Architectural feature survey in Hinglish"
+  },
+  {
+    "query_id": "HG-08",
+    "question": "Agar database ka schema change ho jaye to migrations kaise handle ho rahe hain?",
+    "language": "hinglish",
+    "intent": "architecture_overview",
+    "expected_symbols": [
+      "migrations"
+    ],
+    "expected_files": [
+      "manage.py"
+    ],
+    "description": "Database maintenance inquiry in Hinglish"
+  },
+  {
+    "query_id": "HG-09",
+    "question": "Password reset ki functionality implemented hai ya pending hai?",
+    "language": "hinglish",
+    "intent": "generic_search",
+    "expected_symbols": [
+      "PasswordResetView",
+      "reset_password"
+    ],
+    "expected_files": [
+      "users/views.py",
+      "users/urls.py"
+    ],
+    "description": "Feature presence inquiry in Hinglish"
+  },
+  {
+    "query_id": "HG-10",
+    "question": "Todo model mein status field kaun kaun si values le sakta hai?",
+    "language": "hinglish",
+    "intent": "explain_model",
+    "expected_symbols": [
+      "Todo",
+      "status",
+      "choices"
+    ],
+    "expected_files": [
+      "todos/models.py"
+    ],
+    "description": "Field choices inspection in Hinglish"
+  },
+  {
+    "query_id": "HG-11",
+    "question": "TodoList view mein authorization check kaise lagaya hai?",
+    "language": "hinglish",
+    "intent": "locate_symbol",
+    "expected_symbols": [
+      "TodoList",
+      "login_required",
+      "request.user"
+    ],
+    "expected_files": [
+      "todos/views.py"
+    ],
+    "description": "Security authorization logic in Hinglish"
+  },
+  {
+    "query_id": "HG-12",
+    "question": "Config settings mein installed apps ki list kya hai?",
+    "language": "hinglish",
+    "intent": "locate_symbol",
+    "expected_symbols": [
+      "INSTALLED_APPS"
+    ],
+    "expected_files": [
+      "config/settings.py"
+    ],
+    "description": "Configuration setting lookup in Hinglish"
+  }
+]
